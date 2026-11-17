@@ -1,0 +1,42 @@
+{
+  // Deploy template: copy to wrangler.jsonc, fill in your own account and database ids, then `npm run deploy`.
+  // wrangler.jsonc is git-ignored so your real ids never land in a fork.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mailroom",
+  // Recommended: deploying to the wrong account then fails loudly.
+  // "account_id": "<your Cloudflare account id>",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // The public endpoints (Resend webhooks, clients on other Cloudflare accounts) live on workers.dev.
+  // If you don't need them, set this to false (or move them to a custom domain).
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mailroom", "database_id": "<fill in after: npx wrangler d1 create mailroom>", "migrations_dir": "migrations" }
+  ],
+  "vars": {
+    // Sender domain for tier 1 "must deliver" mail (sign-in, invites, payments). Verify it with your providers first.
+    "FROM_DOMAIN": "notify.example.com",
+    // Sender domain for tier 2 "service reminders" (off by default). If you enable it, also set the secret
+    // RESEND_API_KEY_REMIND — without it tier 2 skips Resend and uses SMTP2GO only.
+    // "REMIND_DOMAIN": "remind.example.com",
+    // Provider order. Keys are "site:tier" or "*:tier"; anything not listed uses Resend -> SMTP2GO.
+    // Example: { "*:remind": ["cloudflare", "resend", "smtp2go"] }
+    "ROUTES": {},
+    // Clients that send over the public HTTP endpoint (comma separated). Each needs a secret HTTP_KEY_<SITE_NAME_UPPERCASE>.
+    "HTTP_CLIENTS": "",
+    // Per-client limits on the public HTTP endpoint (caps the damage if a client key leaks).
+    // Missing or invalid -> default; an explicit 0 means unlimited.
+    "HTTP_RATE_PER_MIN": 60,
+    "HTTP_DAILY_LIMIT": 2000
+    // Per-client sender allowlist for the public HTTP endpoint (strongly recommended):
+    // "HTTP_FROM": { "shop": ["orders@notify.example.com"] }
+  },
+  // Only needed if you send through Cloudflare Email Sending. List every allowed sender address.
+  // "send_email": [{ "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["app@remind.example.com"] }],
+  // Delivery / bounce / complaint events from Cloudflare Email Sending (only if you use it).
+  // "queues": { "consumers": [{ "queue": "mailroom-email-events", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 5 }] },
+  // Secrets (always add as Secret, never as a plain variable):
+  //   RESEND_API_KEY, SMTP2GO_API_KEY, RESEND_WEBHOOK_SECRET, DRILL_TOKEN, HTTP_KEY_*, RESEND_API_KEY_REMIND (optional)
+  "observability": { "enabled": true }
+}

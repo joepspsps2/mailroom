@@ -1,0 +1,50 @@
+{
+  "name": "@joelincc/mailroom",
+  "version": "0.1.0",
+  "description": "Must-deliver transactional email for Cloudflare Workers: multi-provider failover (Resend, SMTP2GO, Cloudflare Email Sending), idempotent sends, a suppression list and bounce/complaint feedback, with a D1 ledger.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joepspsps2/mailroom.git"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "migrations",
+    "wrangler.example.jsonc",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "docs"
+  ],
+  "keywords": [
+    "cloudflare-workers",
+    "email",
+    "transactional-email",
+    "failover",
+    "resend",
+    "smtp2go",
+    "d1",
+    "idempotency",
+    "suppression-list"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "wrangler d1 migrations apply mailroom --remote",
+    "deploy": "npm test && npm run typecheck && npm run db:migrate && wrangler deploy",
+    "dev": "wrangler dev",
+    "clean-scan": "node .public-gate/clean-scan.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "typescript": "^5.6.3",
+    "wrangler": "4.162.0"
+  },
+  "engines": {
+    "node": ">=22.23.4"
+  }
+}
