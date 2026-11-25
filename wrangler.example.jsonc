@@ -29,8 +29,10 @@
     // Missing or invalid -> default; an explicit 0 means unlimited.
     "HTTP_RATE_PER_MIN": 60,
     "HTTP_DAILY_LIMIT": 2000
-    // Per-client sender allowlist for the public HTTP endpoint (strongly recommended):
-    // "HTTP_FROM": { "shop": ["orders@notify.example.com"] }
+    // Per-client sender allowlist for the public HTTP endpoint (REQUIRED for every client in HTTP_CLIENTS; a client without an entry is refused):
+    // "HTTP_FROM": { "shop": ["orders@notify.example.com"] },
+    // Delete ledger rows older than this many days (needs the cron trigger below). Unset = never delete automatically.
+    // "LEDGER_RETENTION_DAYS": 180
   },
   // Only needed if you send through Cloudflare Email Sending. List every allowed sender address.
   // "send_email": [{ "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["app@remind.example.com"] }],
@@ -38,5 +40,7 @@
   // "queues": { "consumers": [{ "queue": "mailroom-email-events", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 5 }] },
   // Secrets (always add as Secret, never as a plain variable):
   //   RESEND_API_KEY, SMTP2GO_API_KEY, RESEND_WEBHOOK_SECRET, DRILL_TOKEN, HTTP_KEY_*, RESEND_API_KEY_REMIND (optional)
+  // Needed for LEDGER_RETENTION_DAYS and DAILY_DRILL: the Worker's scheduled handler runs on this trigger.
+  // "triggers": { "crons": ["17 3 * * *"] },
   "observability": { "enabled": true }
 }

@@ -29,8 +29,7 @@ One D1 database, four tables:
 | `webhook_events` | none (event id, type, time) | |
 | `rate_counters` | none | Rows older than two days are pruned opportunistically, on a small share of HTTP requests. |
 
-**There is no automatic retention limit on `messages`, `suppressions` or `webhook_events`.** Decide a retention
-period that fits your privacy obligations and delete older rows yourself, for example monthly:
+**Retention is off until you turn it on.** Set `LEDGER_RETENTION_DAYS` (a positive integer, e.g. `180`) and add a cron trigger: each run then deletes `messages` rows and `webhook_events` rows older than that (up to 5,000 of each per run; rows still `sending` are kept). `suppressions` are never deleted automatically — they are a defence, not a log; remove entries with `/v1/unsuppress`. Without the variable or without a cron trigger nothing is deleted. You can also clean by hand, for example:
 
 ```bash
 npx wrangler d1 execute mailroom --remote --command \
@@ -60,7 +59,7 @@ Your providers (Resend, SMTP2GO, Cloudflare) receive the full message and keep t
 ## Hardening checklist
 
 - [ ] Every secret is a Cloudflare **Secret**, never a plain variable, never in `wrangler.jsonc`. `wrangler.jsonc` and `.dev.vars` stay git-ignored.
-- [ ] Each HTTP client has its own key, and an `HTTP_FROM` entry listing exactly the sender addresses it may use. (If `HTTP_FROM` is set but isn't valid JSON, `/v1/send` refuses everything with a 500 rather than running without the allowlist.)
+- [ ] Each HTTP client has its own key, and an `HTTP_FROM` entry listing exactly the sender addresses it may use. A client without an entry is refused (403 `from_allowlist_required`), and if `HTTP_FROM` is set but isn't valid JSON `/v1/send` refuses everything with a 500.
 - [ ] `HTTP_RATE_PER_MIN` and `HTTP_DAILY_LIMIT` are set to what your busiest client really needs, not left at the defaults.
 - [ ] Keys are long and random (`openssl rand -hex 32`). There is no lockout on wrong keys; length is the defence.
 - [ ] `DRILL_TOKEN` is set only while you are running a drill or lifting a suppression, or is rotated regularly.
@@ -68,7 +67,7 @@ Your providers (Resend, SMTP2GO, Cloudflare) receive the full message and keep t
 - [ ] If you don't use webhooks or HTTP clients, `workers_dev` is `false`. If you do, consider a WAF rate-limiting rule in front of `/v1/*`.
 - [ ] SPF, DKIM and DMARC are set up for every sender domain.
 - [ ] You pin the mailroom version you deploy and read the diff before upgrading. Nothing here updates itself.
-- [ ] You have a retention job for the ledger (see above).
+- [ ] `LEDGER_RETENTION_DAYS` is set and a cron trigger exists (see above), or you have your own retention job.
 - [ ] After every deploy you run the drill from the README.
 
 ## Known limits
