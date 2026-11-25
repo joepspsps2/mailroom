@@ -38,6 +38,28 @@ Two tiers share the same ledger and suppression list but use separate sender dom
 
 The `from` address must belong to the tier's domain.
 
+## Supported providers
+
+mailroom supports exactly **three** providers: **Resend**, **SMTP2GO** and **Cloudflare Email Sending**. `ROUTES` only accepts those three names (`resend`, `smtp2go`, `cloudflare`); anything else is ignored. If you want another provider (SES, Postmark, Mailgun, a plain SMTP relay…), you have to write an adapter yourself in `src/transport.ts` and add its name to `MAIL_ROUTES` — there is no plugin interface, and no support for doing so.
+
+## Verify your sender domain first
+
+Providers refuse to send, or the mail lands in spam, until the domain in your `from` address is verified. Do this for every sender domain (`FROM_DOMAIN`, and `REMIND_DOMAIN` if you use tier 2), **at each provider you enable**. Using a dedicated subdomain such as `notify.example.com` keeps this mail's reputation apart from your main domain.
+
+1. In the provider's dashboard (Resend → Domains, SMTP2GO → Sending → Verified Senders → Sender Domains, Cloudflare → Email Sending), add the domain. The provider then shows you the exact DNS records to create — copy them from there, because the values are specific to your account.
+2. Add those records at your DNS host. They normally come in three kinds:
+
+   | Record | What it does | Typical shape (example values — use the ones your provider shows) |
+   |---|---|---|
+   | **SPF** (TXT) | Lists who may send for the domain. Providers usually put theirs on a provider-specific sub-label (for example `send.notify.example.com`) so it doesn't collide with your own. If you add one on the sending domain itself, there must be **only one** SPF record per name: merge them (`v=spf1 include:provider-a.example include:provider-b.example ~all`), never publish two. | `TXT  notify.example.com  "v=spf1 include:spf.provider.example ~all"` |
+   | **DKIM** (TXT or CNAME) | A public key the provider signs each message with, so receivers can check it wasn't altered and really came from you. Each provider gives its own selector, so several providers can coexist. | `CNAME  s1._domainkey.notify.example.com  →  s1.dkim.provider.example` (or a TXT with `v=DKIM1; k=rsa; p=…`) |
+   | **DMARC** (TXT, once per domain) | Tells receivers what to do when SPF/DKIM fail, and where to send reports. Start with monitoring only. | `TXT  _dmarc.notify.example.com  "v=DMARC1; p=none; rua=mailto:dmarc@example.com"` |
+
+3. Wait for the provider to show the domain as **Verified** (DNS can take minutes to hours). DMARC passes when SPF or DKIM passes *and aligns* with the `from` domain, so check that your provider's records authenticate the same domain you put in `FROM_DOMAIN`.
+4. Send a drill (below) to a mailbox you control, open "show original" and confirm `SPF: PASS`, `DKIM: PASS`, `DMARC: PASS`. Once that is stable you can tighten DMARC to `p=quarantine` or `p=reject`.
+
+If a provider key can be scoped to one domain (Resend can), create it after the domain is verified.
+
 ## Quick deploy
 
 You need a Cloudflare account, Node.js ≥ 22, and at least one provider account (Resend and/or SMTP2GO) with your sender domain verified.
@@ -79,7 +101,7 @@ const r = await env.MAILROOM.send({
 });
 ```
 
-**From anywhere else** — `POST /v1/send` with `Authorization: Bearer <HTTP_KEY_SITE>` and the same JSON body. The key decides which `site` the message belongs to; a `site` in the body is ignored. Enable a client by adding its name to `HTTP_CLIENTS` and setting the secret `HTTP_KEY_<NAME_UPPERCASE>` (dashes become underscores).
+**From anywhere else** — `POST /v1/send` with `Authorization: Bearer <HTTP_KEY_SITE>` and the same JSON body. The key decides which `site` the message belongs to; a `site` in the body is ignored. Enable a client by adding its name to `HTTP_CLIENTS`, setting the secret `HTTP_KEY_<NAME_UPPERCASE>` (dashes become underscores) and listing its allowed sender addresses in `HTTP_FROM`.
 
 ### Responses
 
@@ -99,14 +121,14 @@ If your app can't reach the mailroom at all, queue the message locally and retry
 | Path | Purpose | Protection |
 |---|---|---|
 | `POST /webhooks/resend` | Resend events (delivered, bounced, complained, failed, delayed); permanent bounces and complaints go into the suppression list | Svix signature (`RESEND_WEBHOOK_SECRET`), 5-minute timestamp window |
-| `POST /v1/send` | Sending from apps outside your Cloudflare account | per-client `HTTP_KEY_*`; rate limits `HTTP_RATE_PER_MIN` (default 60) and `HTTP_DAILY_LIMIT` (default 2000 per UTC day); optional sender allowlist `HTTP_FROM` |
+| `POST /v1/send` | Sending from apps outside your Cloudflare account | per-client `HTTP_KEY_*`; rate limits `HTTP_RATE_PER_MIN` (default 60) and `HTTP_DAILY_LIMIT` (default 2000 per UTC day); sender allowlist `HTTP_FROM` (required per client) |
 | `POST /v1/drill`, `GET /v1/lookup`, `GET /v1/report`, `POST /v1/unsuppress` | Operator tools (see below) | `DRILL_TOKEN`; **if it isn't set these paths return 404**; 20 requests/min and 200/day in total |
 
 Apart from `GET /` (a plain-text health check), anything else returns 404. Unknown keys get a 404, not a 401, so the endpoint doesn't confirm that it exists. The operator endpoints only return status fields — never recipients, senders or subjects — so a leaked `DRILL_TOKEN` can't be used to read your mail log. It **can** still be used to send drill emails from your domain to any address (capped by the limit above) and to lift suppressions, so treat it like a password: set it only when you need it, and rotate it after use (`wrangler secret put DRILL_TOKEN`, or `wrangler secret delete DRILL_TOKEN` to switch the endpoints off). Request bodies must carry a `Content-Length` header (411 otherwise) and are capped at 3 MB (`/v1/send`) and 256 KB (webhook). Someone holding a leaked token can also use up the operator quota for the day, locking you out until you rotate the token.
 
 The webhook needs a public URL, which is why `workers_dev` is on in the template. If you don't use Resend webhooks or HTTP clients, set `"workers_dev": false` and the Worker is reachable only through service bindings.
 
-**Strongly recommended for every HTTP client:** set `HTTP_FROM` (`{ "shop": ["orders@notify.example.com"] }`). Without it a client may use any address on the tier's domain (a warning is logged).
+**Required for every HTTP client:** set `HTTP_FROM` (`{ "shop": ["orders@notify.example.com"] }`) with the exact sender addresses that client may use. A client listed in `HTTP_CLIENTS` that has no entry is **refused** (`403`, `reason: "from_allowlist_required"`) — a leaked key must never be usable with every address on your domain. (Before 0.2.0 this only logged a warning.)
 
 ## Operating it
 
@@ -137,7 +159,11 @@ curl -X POST $URL/v1/unsuppress -H "Authorization: Bearer $DRILL_TOKEN" \
 
 ### Configuration reference
 
-Variables (`wrangler.jsonc` → `vars`): `FROM_DOMAIN`, `REMIND_DOMAIN`, `ROUTES`, `HTTP_CLIENTS`, `HTTP_RATE_PER_MIN`, `HTTP_DAILY_LIMIT` (non-negative integers only; missing, blank or invalid → default; an explicit `0` means unlimited), `HTTP_FROM`, `DAILY_DRILL` (optional scheduled drill: `{ "until": "YYYY-MM-DD", "to": ["you@example.com"], "tier": "remind", "utcOffsetHours": 0 }` — `until` is inclusive and compared in UTC unless you set `utcOffsetHours`; sends at most one round per day — extra cron runs that day return `duplicate` — so add a daily cron trigger).
+Variables (`wrangler.jsonc` → `vars`): `FROM_DOMAIN`, `REMIND_DOMAIN`, `ROUTES`, `HTTP_CLIENTS`, `HTTP_RATE_PER_MIN`, `HTTP_DAILY_LIMIT` (non-negative integers only; missing, blank or invalid → default; an explicit `0` means unlimited), `HTTP_FROM`, `LEDGER_RETENTION_DAYS` (positive integer; with a cron trigger, each run deletes `messages` and `webhook_events` rows older than that many days — missing, blank or invalid means nothing is deleted automatically; see below), `DAILY_DRILL` (optional scheduled drill: `{ "until": "YYYY-MM-DD", "to": ["you@example.com"], "tier": "remind", "utcOffsetHours": 0 }` — `until` is inclusive and compared in UTC unless you set `utcOffsetHours`; sends at most one round per day — extra cron runs that day return `duplicate` — so add a daily cron trigger).
+
+**Ledger retention** — set `LEDGER_RETENTION_DAYS` (for example `180`) and add a cron trigger (`"triggers": { "crons": ["17 3 * * *"] }` in `wrangler.jsonc`). Each run deletes up to 5,000 `messages` rows and 5,000 `webhook_events` rows older than the limit (rows still `sending` are kept; the suppression list is never touched) and continues on the next run. Without a cron trigger nothing runs, so nothing is deleted. Deleting a `messages` row also forgets its idempotency key, so choose a period longer than any retry window your apps use.
+
+**Previous failure reason** — when a failed key is retried, the earlier error is copied to `last_error` before `error` is cleared, so `GET /v1/lookup` still shows why the first attempt failed even if the retry succeeded.
 
 Secrets (always add as **Secret**, never as a plain variable): `RESEND_API_KEY`, `SMTP2GO_API_KEY`, `RESEND_WEBHOOK_SECRET`, `DRILL_TOKEN`, `HTTP_KEY_*`, `RESEND_API_KEY_REMIND` (Resend keys can be scoped to one domain, so tier 2 can have its own).
 
@@ -159,7 +185,7 @@ Forks are welcome — that's what the MIT license is for. Issues and pull reques
 
 Pull requests run tests and a clean-scan; changes to `src/`, `migrations/`, workflows or dependencies wait for an owner review. Details, including the rules for AI-assisted contributions, are in [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
-Before you deploy, read [docs/security-model.md](docs/security-model.md): who mailroom trusts, what personal data the ledger holds (and that **it has no automatic retention limit**), what each secret can do if it leaks, and a hardening checklist. Security issues: see [SECURITY.md](SECURITY.md) — please report privately, not in a public issue.
+Before you deploy, read [docs/security-model.md](docs/security-model.md): who mailroom trusts, what personal data the ledger holds (and how to set an automatic retention limit), what each secret can do if it leaks, and a hardening checklist. Security issues: see [SECURITY.md](SECURITY.md) — please report privately, not in a public issue.
 
 ## License
 

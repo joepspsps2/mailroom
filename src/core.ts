@@ -61,7 +61,7 @@ export interface SendResult {
 
 export interface MessageRow {
   id: number; stream: Stream; tier: Tier | null; site: string; dedupe_key: string; kind: string | null; to_email: string; from_addr: string;
-  subject: string; status: string; route: string | null; provider_id: string | null; error: string | null; attempts: number;
+  subject: string; status: string; route: string | null; provider_id: string | null; error: string | null; last_error: string | null; attempts: number;
   last_event: string | null; created_at: string; updated_at: string; sent_at: string | null;
 }
 
@@ -217,6 +217,42 @@ export async function pruneRate(db: Db, now = new Date()): Promise<void> {
   await db.prepare("DELETE FROM rate_counters WHERE (win LIKE 'm:%' AND win < ?) OR (win LIKE 'd:%' AND win < ?)").bind(`m:${cutoff.slice(0, 16)}`, `d:${cutoff.slice(0, 10)}`).run();
 }
 
+/**
+ * 走公開網址的站的寄件白名單檢查。該站沒列白名單＝拒收（'allowlist_required'）；
+ * 有列但這封的寄件人不在內＝'from_not_allowed'；通過回 null。
+ */
+export function checkHttpFrom(table: Record<string, string[]> | undefined, site: string, rawFrom: unknown): 'allowlist_required' | 'from_not_allowed' | null {
+  const allowed = table?.[site];
+  if (!Array.isArray(allowed) || allowed.length === 0) return 'allowlist_required';
+  const from = parseAddress(String(rawFrom ?? ''));
+  if (!from || !allowed.map((a) => String(a).toLowerCase()).includes(from.addr)) return 'from_not_allowed';
+  return null;
+}
+
+/** 帳本保存天數設定：沒設、空白或不合法＝null（不自動清）；只接受 ≥1 的整數（0 不算，避免誤設成把帳本全清）。 */
+export function retentionDays(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v.trim()) : NaN;
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/**
+ * 清掉超過保存天數的帳本列（messages 看 created_at、webhook_events 看 received_at）。
+ * 「正在寄」的列不動；拒收名單不清（那是防線不是紀錄）。一次最多清 limit 列，沒清完下一輪排程接著清。
+ * 回傳實際刪掉的列數。
+ */
+export async function purgeLedger(db: Db, days: number, now = new Date(), limit = 5000): Promise<{ messages: number; webhookEvents: number }> {
+  const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
+  const m = await db
+    .prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE created_at < ? AND status != 'sending' ORDER BY id LIMIT ?)")
+    .bind(cutoff, limit)
+    .run();
+  const w = await db
+    .prepare('DELETE FROM webhook_events WHERE id IN (SELECT id FROM webhook_events WHERE received_at < ? LIMIT ?)')
+    .bind(cutoff, limit)
+    .run();
+  return { messages: m.meta.changes ?? 0, webhookEvents: w.meta.changes ?? 0 };
+}
+
 export async function lookup(db: Db, site: string, key: string): Promise<MessageRow | null> {
   return db.prepare('SELECT * FROM messages WHERE site = ? AND dedupe_key = ?').bind(site, key).first<MessageRow>();
 }
@@ -247,6 +283,7 @@ export async function send(deps: CoreDeps, req: SendRequest, opts: { forceInvali
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
        ON CONFLICT (site, dedupe_key) DO UPDATE SET
          status = excluded.status, error = excluded.error, attempts = messages.attempts + 1, updated_at = excluded.updated_at,
+         last_error = COALESCE(messages.error, messages.last_error),
          to_email = excluded.to_email, from_addr = excluded.from_addr, subject = excluded.subject, tier = excluded.tier
        WHERE messages.status IN ('failed', 'suppressed') OR (messages.status = 'sending' AND messages.updated_at < ?)
        RETURNING id`,

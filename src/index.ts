@@ -7,10 +7,10 @@
 //   別的 Cloudflare 帳號的站帶自己的鑰匙 POST /v1/send；演習 POST /v1/drill；寄信統計 GET /v1/report；
 //   人工解除拒收 POST /v1/unsuppress。
 // - Queue：Cloudflare 寄信的事後回報（cf-events.ts）。
-// - 排程：有設 cron 與 DAILY_DRILL 時，每天最多寄一輪演習信（過了 until 自動停）。
+// - 排程：有設 cron 時，每次順手清舊計數窗；有設 DAILY_DRILL 時每天最多寄一輪演習信（過了 until 自動停）；有設 LEDGER_RETENTION_DAYS 時清過期帳本列。
 
 import { WorkerEntrypoint } from 'cloudflare:workers';
-import { bodySizeProblem, limitVar, localDay, lookup, parseAddress, pruneRate, removeSuppression, send, SUPPRESSION_REASONS, takeRate, TIERS, type SuppressionReason, type CoreDeps, type MessageRow, type RouteTable, type SendRequest, type SendResult, type Tier } from './core.ts';
+import { bodySizeProblem, checkHttpFrom, limitVar, localDay, lookup, parseAddress, pruneRate, purgeLedger, removeSuppression, retentionDays, send, SUPPRESSION_REASONS, takeRate, TIERS, type SuppressionReason, type CoreDeps, type MessageRow, type RouteTable, type SendRequest, type SendResult, type Tier } from './core.ts';
 import { handleCfEvent } from './cf-events.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
@@ -35,8 +35,10 @@ export interface Env {
   HTTP_RATE_PER_MIN?: string | number;
   /** 走公開網址的站每天最多幾次請求（預設 2000，UTC 日）。 */
   HTTP_DAILY_LIMIT?: string | number;
-  /** 走公開網址的站准用的寄件地址（JSON：{ "站": ["app@notify.example.com"] }）。沒列的站＝該層網域內任一地址（並記警告）。 */
+  /** 走公開網址的站准用的寄件地址（JSON：{ "站": ["app@notify.example.com"] }）。每個 HTTP client 都必須列；沒列的站一律拒收（from_allowlist_required）。 */
   HTTP_FROM?: Record<string, string[]> | string;
+  /** 帳本保存天數（正整數）。設了之後，排程（cron）每次會順手清掉超過天數的 messages 與 webhook_events；沒設＝不自動清。 */
+  LEDGER_RETENTION_DAYS?: string | number;
   RESEND_API_KEY?: string;
   SMTP2GO_API_KEY?: string;
   RESEND_WEBHOOK_SECRET?: string;
@@ -180,8 +182,8 @@ const notFound = () => new Response('Not found', { status: 404 });
 /** 公開網址查帳只回狀態欄位，不回收件人、寄件人、主旨（口令外洩時不會變成查收件人的工具）。 */
 function publicRow(row: MessageRow | null) {
   if (!row) return null;
-  const { id, stream, tier, site, dedupe_key, kind, status, route, attempts, last_event, error, created_at, updated_at, sent_at } = row;
-  return { id, stream, tier, site, dedupe_key, kind, status, route, attempts, last_event, error, created_at, updated_at, sent_at };
+  const { id, stream, tier, site, dedupe_key, kind, status, route, attempts, last_event, error, last_error, created_at, updated_at, sent_at } = row;
+  return { id, stream, tier, site, dedupe_key, kind, status, route, attempts, last_event, error, last_error, created_at, updated_at, sent_at };
 }
 
 export default {
@@ -227,13 +229,13 @@ export default {
         console.error('HTTP_FROM unreadable, refusing http sends');
         return json({ status: 'failed', retryable: true, reason: 'config_error' }, 500);
       }
-      const allowed = fromTable?.[site];
-      if (allowed) {
-        const from = parseAddress(String(req.from ?? ''));
-        if (!from || !allowed.map((a) => a.toLowerCase()).includes(from.addr)) return json({ status: 'rejected', retryable: false, reason: 'from_not_allowed' }, 400);
-      } else {
-        console.warn('http client without HTTP_FROM allowlist', site);
+      const fromProblem = checkHttpFrom(fromTable, site, req.from);
+      if (fromProblem === 'allowlist_required') {
+        // 沒列白名單就拒收：預設不能是「這把鑰匙可以用整個網域任一地址寄」。
+        console.warn('http client without HTTP_FROM allowlist, refusing', site);
+        return json({ status: 'rejected', retryable: false, reason: 'from_allowlist_required' }, 403);
       }
+      if (fromProblem) return json({ status: 'rejected', retryable: false, reason: 'from_not_allowed' }, 400);
       const result = await send(deps(env), { ...req, site });
       return json(result, result.status === 'rejected' ? 400 : result.status === 'failed' ? 502 : 200);
     }
@@ -285,5 +287,15 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     const out = await dailyDrill(env);
     if (out.length) console.log('daily drill', out.join(','));
+    const days = retentionDays(env.LEDGER_RETENTION_DAYS);
+    if (days !== null) {
+      try {
+        const n = await purgeLedger(env.DB, days);
+        if (n.messages || n.webhookEvents) console.log('ledger purge', n.messages, n.webhookEvents);
+      } catch (e) {
+        console.error('ledger purge failed', e instanceof Error ? e.message : 'unknown');
+      }
+    }
+    await pruneRate(env.DB).catch((e) => console.error('prune rate failed', e instanceof Error ? e.message : 'unknown'));
   },
 } satisfies ExportedHandler<Env>;
