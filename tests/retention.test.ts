@@ -69,11 +69,11 @@ test('a second failure then success still keeps the most recent failure reason',
 });
 
 test('checkHttpFrom: no allowlist for the site means refuse', () => {
-  assert.equal(checkHttpFrom(undefined, 'shop', 'a@x.com'), 'allowlist_required');
-  assert.equal(checkHttpFrom({}, 'shop', 'a@x.com'), 'allowlist_required');
-  assert.equal(checkHttpFrom({ other: ['a@x.com'] }, 'shop', 'a@x.com'), 'allowlist_required');
-  assert.equal(checkHttpFrom({ shop: [] }, 'shop', 'a@x.com'), 'allowlist_required');
-  assert.equal(checkHttpFrom({ shop: ['A@X.com'] }, 'shop', 'Shop <a@x.com>'), null);
-  assert.equal(checkHttpFrom({ shop: ['a@x.com'] }, 'shop', 'b@x.com'), 'from_not_allowed');
-  assert.equal(checkHttpFrom({ shop: ['a@x.com'] }, 'shop', undefined), 'from_not_allowed');
+  assert.equal(checkHttpFrom(undefined, 'shop', 'a@notify.example.com'), 'allowlist_required');
+  assert.equal(checkHttpFrom({}, 'shop', 'a@notify.example.com'), 'allowlist_required');
+  assert.equal(checkHttpFrom({ other: ['a@notify.example.com'] }, 'shop', 'a@notify.example.com'), 'allowlist_required');
+  assert.equal(checkHttpFrom({ shop: [] }, 'shop', 'a@notify.example.com'), 'allowlist_required');
+  assert.equal(checkHttpFrom({ shop: ['A@Notify.Example.com'] }, 'shop', 'Shop <a@notify.example.com>'), null);
+  assert.equal(checkHttpFrom({ shop: ['a@notify.example.com'] }, 'shop', 'b@notify.example.com'), 'from_not_allowed');
+  assert.equal(checkHttpFrom({ shop: ['a@notify.example.com'] }, 'shop', undefined), 'from_not_allowed');
 });
