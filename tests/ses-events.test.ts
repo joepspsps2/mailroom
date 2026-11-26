@@ -306,7 +306,8 @@ test('正規化：每種事件 → 對的型別；收件人只認原信收件人
   assert.equal(sub('General').cause, undefined);
   assert.equal(sub('CustomTimeoutExceeded').cause, undefined);
   assert.equal(sub('Undetermined', 'Undetermined').subtype, 'Undetermined');
-  assert.equal(sub('OnAccountSuppressionList', 'Permanent').subtype, 'Permanent');
+  assert.deepEqual([sub('OnAccountSuppressionList', 'Permanent').type, sub('OnAccountSuppressionList', 'Permanent').skipFeedback], ['reject', true]);
+  assert.equal(sub('NoEmail', 'Permanent').subtype, 'Permanent');
   // 沒有 mail.messageId、不是物件 → 不認
   assert.deepEqual(normalizeSesEvent({ eventType: 'Bounce' }, 'x'), []);
   assert.deepEqual(normalizeSesEvent('nope', 'x'), []);
@@ -326,10 +327,11 @@ test('別的設定組的事件不處理（同一個帳號或主題的其他寄�
 test('SES 因帳號層級拒收名單根本沒寄（OnAccountSuppressionList）：只記事件，不重新封鎖、不退訂', async () => {
   const db = await world();
   const { opts } = setupNet();
-  assert.equal((await post(db, signed({ Type: 'Notification', Message: bounce('a@example.com', 'Permanent', 'OnAccountSuppressionList') }), opts)).outcome, 'bounce:recorded');
+  assert.equal((await post(db, signed({ Type: 'Notification', Message: bounce('a@example.com', 'Permanent', 'OnAccountSuppressionList') }), opts)).outcome, 'reject:recorded');
   const c = sesEvent('Complaint', 'b@example.com', { complaint: { complainedRecipients: [{ emailAddress: 'b@example.com' }], complaintSubType: 'OnAccountSuppressionList' } });
-  assert.equal((await post(db, signed({ Type: 'Notification', Message: c }), opts)).outcome, 'complaint:recorded');
+  assert.equal((await post(db, signed({ Type: 'Notification', Message: c }), opts)).outcome, 'reject:recorded');
   assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), null);
+  assert.equal(count(db, 'events', "type IN ('bounce', 'complaint')"), 0, '不算進退信率與檢舉率');
   assert.equal(await suppressedReason(db, 'b@example.com', 'transactional'), null);
   assert.equal(member(db, 'weekly', 'b@example.com').status, 'subscribed');
   assert.equal(count(db, 'events'), 2);

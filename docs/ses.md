@@ -71,8 +71,8 @@ all is attributed to the message's single recipient.
 
 Bounces with subtype `OnAccountSuppressionList` (and the tenant / email-validation variants) and complaints with
 `complaintSubType: OnAccountSuppressionList` mean SES did not send the message because the address is already on the
-SES account-level suppression list. They are recorded as events but do not touch mailroom's suppression list or list
-memberships. If you lift a suppression in mailroom (`/v1/unsuppress`), remove the address from the SES account-level
+SES account-level suppression list. They are recorded as `reject` events (so they do not count toward bounce or complaint rates)
+and do not touch mailroom's suppression list or list memberships. If you lift a suppression in mailroom (`/v1/unsuppress`), remove the address from the SES account-level
 list too, or SES will keep dropping its newsletter mail.
 
 `Throttling` "Daily message quota exceeded" stops releases for the rest of the local day (`daily_limit`), like the
@@ -106,7 +106,7 @@ Worker:
 // Secrets: SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY
 ```
 
-Without `SES_SNS_TOPIC_ARNS` and `SES_REGION`, `/webhooks/ses` answers 404. Without all four `SES_*` sending values,
+Without `SES_SNS_TOPIC_ARNS`, `SES_REGION` and `SES_CONFIGURATION_SET`, `/webhooks/ses` answers 404. Without all four `SES_*` sending values,
 `NEWSLETTER_POSTMAN = "ses"` disables broadcasting (and logs why) rather than sending without events.
 
 ## Testing in the SES sandbox

@@ -70,7 +70,7 @@ export interface Env extends BroadcastEnv {
   UNSUB_ALERT_TOKEN?: string;
   /** 退訂頁文字（JSON 物件，只寫想改的欄位，見 docs/unsubscribe.md）。 */
   UNSUB_PAGE?: string | Record<string, unknown>;
-  /** SES 事件入口准收的 SNS 主題 ARN（逗號分隔）。沒設＝POST /webhooks/ses 一律 404。 */
+  /** SES 事件入口准收的 SNS 主題 ARN（逗號分隔）。沒設（或沒設 SES_REGION、SES_CONFIGURATION_SET）＝POST /webhooks/ses 一律 404。 */
   SES_SNS_TOPIC_ARNS?: string;
   /** "true"＝也收 SNS SignatureVersion 1（SHA1）。預設只收 2，主題請設 SignatureVersion=2。 */
   SES_SNS_ALLOW_SHA1?: string;
@@ -234,7 +234,8 @@ export default {
 
     if (url.pathname === '/webhooks/ses' && request.method === 'POST') {
       const topicArns = (env.SES_SNS_TOPIC_ARNS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-      if (!topicArns.length || !env.SES_REGION) return notFound();
+      // 設定組也要有：沒有就無法只收自己的事件（同一個主題裡別的寄信會混進來），一律不收。
+      if (!topicArns.length || !env.SES_REGION || !env.SES_CONFIGURATION_SET) return notFound();
       const size = bodySizeProblem(request.headers.get('content-length'), MAX_WEBHOOK_BYTES);
       if (size) return new Response(size, { status: size === 'missing' ? 411 : 413 });
       const r = await handleSesWebhook(env.DB, await request.text(), { region: env.SES_REGION, topicArns, configurationSet: env.SES_CONFIGURATION_SET, allowSha1: env.SES_SNS_ALLOW_SHA1 === 'true' }, request.headers.get('x-amz-sns-message-type'));

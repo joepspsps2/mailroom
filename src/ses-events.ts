@@ -328,13 +328,16 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string, opts: { con
       return list.map((email, i) => {
         const r = rs.find((x) => addr(x?.emailAddress) === email) ?? {};
         const cause = type === 'Transient' ? transientCause(subType) : undefined;
+        // SES 根本沒寄（已在 SES 自己的拒收名單）：記成拒收（reject），不算退信率、不進拒收名單。
+        if (subType && NOT_SENT_SUBTYPES.has(subType)) {
+          return { ...make('reject', [email], b.timestamp, { subtype: subType, skipFeedback: true, detail: { from: 'Bounce', feedbackId: str(b.feedbackId, 120) } })[0], providerEventId: `ses:${snsMessageId}:${i}` };
+        }
         return {
           ...make('bounce', [email], b.timestamp)[0],
           providerEventId: `ses:${snsMessageId}:${i}`,
           // 只有 bounceType 正好是 Permanent 才是硬退信；Undetermined、Transient 都不是。
           subtype: type === 'Permanent' ? 'Permanent' : type === 'Transient' ? 'Transient' : 'Undetermined',
           ...(cause ? { cause } : {}),
-          ...(subType && NOT_SENT_SUBTYPES.has(subType) ? { skipFeedback: true } : {}),
           detail: { bounceSubType: subType, status: str(r.status, 20), diagnosticCode: str(r.diagnosticCode, 200), feedbackId: str(b.feedbackId, 120) },
         };
       });
@@ -343,10 +346,13 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string, opts: { con
       const c = e.complaint ?? {};
       // 「不是垃圾信」是更正，不是檢舉。
       if (str(c.complaintFeedbackType) === 'not-spam') return [];
-      const notSent = NOT_SENT_SUBTYPES.has(str(c.complaintSubType, 60) ?? '');
+      const notSentSub = str(c.complaintSubType, 60);
+      if (notSentSub && NOT_SENT_SUBTYPES.has(notSentSub)) {
+        // 同上：SES 沒寄，不是新的檢舉；記成拒收，不算檢舉率。
+        return make('reject', pick(c.complainedRecipients, 'emailAddress'), c.timestamp, { subtype: notSentSub, skipFeedback: true, detail: { from: 'Complaint', feedbackId: str(c.feedbackId, 120) } });
+      }
       return make('complaint', pick(c.complainedRecipients, 'emailAddress'), c.timestamp, {
         subtype: str(c.complaintFeedbackType, 40),
-        ...(notSent ? { skipFeedback: true } : {}),
         detail: { feedbackType: str(c.complaintFeedbackType, 40), complaintSubType: str(c.complaintSubType, 60), feedbackId: str(c.feedbackId, 120) },
       });
     }
