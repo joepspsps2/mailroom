@@ -535,3 +535,50 @@ test('只有 <div …> 或 </div> 的外框行（語言標記等）：外框丟�
   // 帶別的內容的 div 仍然不收
   assert.ok(compose(base({ source: `${FM}<div class="x">夾帶文字</div>` })).problems.some((p) => p.code === 'unsupported_html'));
 });
+
+test('行內程式碼裡的 <!-- 與 --> 不是註解：兩者之間的正文不會消失；同段、不同段落都一樣；沒有對應 --> 也不誤報', () => {
+  const same = compose(base({ source: `${FM}寫 \`<!--\` 開頭，中間這段正文要留，再寫 \`-->\` 收尾\n\n後面段落` }));
+  assert.deepEqual(same.problems.filter((p) => p.severity === 'error'), []);
+  assert.match(same.text, /中間這段正文要留/);
+  assert.match(same.html, /<code[^>]*>&lt;!--<\/code>/);
+  const apart = compose(base({ source: `${FM}第一段 \`<!--\` 在這\n\n中間段落甲\n\n中間段落乙\n\n第四段 \`-->\` 在這` }));
+  assert.deepEqual(apart.problems.filter((p) => p.severity === 'error'), []);
+  assert.match(apart.text, /中間段落甲[\s\S]*中間段落乙/);
+  const lone = compose(base({ source: `${FM}只有開頭 \`<!--\` 沒有收尾\n\n後面段落` }));
+  assert.deepEqual(lone.problems.filter((p) => p.severity === 'error'), [], '行內程式碼裡的 <!-- 不誤報');
+  // 行內程式碼之後的真註解照樣被剝掉；雙反引號與沒配對的反引號
+  const mixed = compose(base({ source: `${FM}看 \`<!--\` 範例 <!-- 真註解 --> 與 \`\`含 \` 的碼 <!--\`\` 結尾\n\n又一個沒配對的 \` 反引號 <!-- 藏起來 --> 之後` }));
+  assert.deepEqual(mixed.problems.filter((p) => p.severity === 'error'), []);
+  assert.ok(!mixed.text.includes('真註解') && !mixed.text.includes('藏起來'));
+  assert.match(mixed.text, /之後/);
+});
+
+test('清單與引言裡縮排的程式碼框：裡面的註解原樣保留（與解析器一致）', () => {
+  const c = compose(base({ source: `${FM}- 項目\n\n    \`\`\`\n    <!-- 框內註解 -->\n    \`\`\`\n\n> \`\`\`\n> <!-- 引言框內 -->\n> \`\`\`\n\n尾段` }));
+  assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), []);
+  assert.match(c.html, /框內註解/);
+  assert.match(c.html, /引言框內/);
+  assert.match(c.text, /尾段/);
+});
+
+test('div 外框只收沒屬性或只有 lang 的；hidden／style 等一律 error（不然要藏的字會寄出去）', () => {
+  for (const tag of ['<div hidden>', '<div style="display:none">', '<div lang="zh" hidden>', '<div class="x">']) {
+    const c = compose(base({ source: `${FM}${tag}\n\n藏的字\n\n</div>` }));
+    assert.ok(c.problems.some((p) => p.code === 'unsupported_html' && p.severity === 'error'), tag);
+  }
+  for (const tag of ['<div>', '<div lang="zh-Hans">', "<div lang='en'>"]) {
+    const c = compose(base({ source: `${FM}${tag}\n\n看得到的字\n\n</div>` }));
+    assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), [], tag);
+    assert.match(c.text, /看得到的字/);
+  }
+});
+
+test('看起來像標籤的字：訊息告訴作者怎麼改寫，不是「信件排不出來的 HTML」', () => {
+  for (const src of [`${FM}參考 <Research.example> 的做法`, `${FM}詳細閱讀：</p/100110>`, `${FM}<Research.example> 在行首`]) {
+    const c = compose(base({ source: src }));
+    const p = c.problems.find((x) => x.code === 'unsupported_html');
+    assert.ok(p && p.severity === 'error' && /看起來像 HTML 標籤/.test(p.message) && /改寫/.test(p.message), src);
+  }
+  const real = compose(base({ source: `${FM}字<span>x</span>` })).problems.find((x) => x.code === 'unsupported_html');
+  assert.match(real?.message ?? '', /排不出來的行內 HTML 標籤/);
+});

@@ -59,6 +59,16 @@ export function decodeEntities(t: string): string {
   });
 }
 
+/** 常見的 HTML 標籤名；不在這張表裡的「<…>」多半只是文字（例如 <Research.example>）。 */
+const HTML_TAG_NAMES = new Set('a abbr b blockquote body br button canvas center code dd del details div dl dt em embed figure font footer form h1 h2 h3 h4 h5 h6 head header hr html i iframe img input ins kbd label li link main mark meta nav object ol p picture pre q s samp script section small source span strike strong style sub summary sup svg table tbody td tfoot th thead title tr u ul var video audio'.split(' '));
+function tagProblem(tag: string, inline: boolean): { message: string; where: string } {
+  const name = tag.match(/^<\/?\s*([a-zA-Z][\w-]*)/)?.[1]?.toLowerCase() ?? '';
+  const where = clip(tag);
+  const wellFormed = /^<\/?[a-zA-Z][\w-]*(?:\s[^>]*)?\/?>$/.test(tag.trim()); // </p/100110> 這種名字像標籤、寫法不是標籤的不算
+  if (HTML_TAG_NAMES.has(name) && wellFormed) return { message: inline ? '原稿有信件排不出來的行內 HTML 標籤' : '原稿有信件排不出來的 HTML 區塊', where };
+  return { message: '原稿有看起來像 HTML 標籤的文字（角括號包著的字），引擎會當成標籤而排不出來；如果它不是標籤，請改寫（拿掉角括號，或用反引號包起來）', where };
+}
+
 const URL_RE = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/g;
 
 function splitFrontmatter(src: string): { body: string; fm: Record<string, string> } {
@@ -253,7 +263,7 @@ export function parseInline(s: string, problems: Problem[], depth = 0): Inline[]
       const tag = s.slice(i).match(/^<\/?[a-zA-Z][^>]*>/);
       if (tag) {
         flush();
-        problems.push({ code: 'unsupported_html', severity: 'error', message: '原稿有信件排不出來的行內 HTML 標籤', where: clip(tag[0]) });
+        problems.push({ code: 'unsupported_html', severity: 'error', ...tagProblem(tag[0], true) });
         i += tag[0].length;
         continue;
       }
@@ -289,6 +299,7 @@ export function parseInline(s: string, problems: Problem[], depth = 0): Inline[]
 // ───────────── 區塊 ─────────────
 
 const FENCE = /^\s{0,3}(```|~~~)/;
+const LOOSE_FENCE = /^[\s>]*(```|~~~)/;
 const HR = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const HEADING = /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
 const QUOTE = /^\s{0,3}>/;
@@ -357,8 +368,8 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
       i++;
       continue;
     }
-    // 只有 <div …> 或 </div> 的行（例如語言標記的外框）：外框丟掉，裡面的內容照常轉
-    if (/^\s*<\/?div\b[^>]*>\s*$/i.test(line)) {
+    // 只有 <div> 、<div lang="…"> 或 </div> 的行（語言標記的外框；帶 hidden／style 等其他屬性的 div 不收）：外框丟掉，裡面的內容照常轉
+    if (/^\s*(?:<div(?:\s+lang\s*=\s*(?:"[A-Za-z-]*"|'[A-Za-z-]*'))?\s*>|<\/div\s*>)\s*$/i.test(line)) {
       i++;
       continue;
     }
@@ -377,7 +388,7 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
       if (EMBED_TAG.test(start)) {
         blocks.push({ t: 'embed' });
       } else {
-        problems.push({ code: 'unsupported_html', severity: 'error', message: '原稿有信件排不出來的 HTML 區塊', where: clip(start) });
+        problems.push({ code: 'unsupported_html', severity: 'error', ...tagProblem(start.trim().match(/^<\/?[a-zA-Z!][^>]*>?/)?.[0] ?? start, false) });
       }
       continue;
     }
@@ -466,6 +477,31 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
  * 拿掉 HTML 註解（<!-- … -->）：行首、段落下一行、清單項目裡、行內、跨行，位置都一樣處理（CommonMark 的註解可以打斷段落）。
  * 程式碼框（``` 或 ~~~）裡的不動。找不到結尾的註解＝記 error，且保留原文（不能把後面整段吃掉）。
  */
+/** 在一行裡找 needle，跳過成對反引號包住的行內程式碼（沒配對的反引號當一般字元）。 */
+function indexOutsideCode(line: string, needle: string): number {
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === '`') {
+      let n = 0;
+      while (line[i + n] === '`') n++;
+      const ticks = '`'.repeat(n);
+      const close = line.indexOf(ticks, i + n);
+      // 找到同樣長度的收尾反引號才算行內程式碼（中間不能剛好是更長的一串）
+      let c = close;
+      while (c >= 0 && line[c + n] === '`') c = line.indexOf(ticks, c + n + 1);
+      if (c >= 0) {
+        i = c + n;
+        continue;
+      }
+      i += n;
+      continue;
+    }
+    if (line.startsWith(needle, i)) return i;
+    i++;
+  }
+  return -1;
+}
+
 export function stripComments(lines: string[], problems: Problem[]): string[] {
   const out: string[] = [];
   let fence: string | null = null;
@@ -473,7 +509,7 @@ export function stripComments(lines: string[], problems: Problem[]): string[] {
   const origin: string[] = [];
   for (const line of lines) {
     if (!open) {
-      const f = line.match(FENCE);
+      const f = line.match(LOOSE_FENCE); // 清單、引言裡縮排的程式碼框也算（解析器之後會一樣處理）
       if (fence) {
         out.push(line);
         if (line.trim().startsWith(fence)) fence = null;
@@ -502,7 +538,7 @@ export function stripComments(lines: string[], problems: Problem[]): string[] {
         open = null;
         removed = true;
       } else {
-        const st = rest.indexOf('<!--');
+        const st = indexOutsideCode(rest, '<!--');
         if (st < 0) {
           kept += rest;
           break;
