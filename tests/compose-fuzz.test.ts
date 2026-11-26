@@ -166,6 +166,12 @@ const REVIEW_CASES: [string, string, string | null][] = [
   ['收斂 英數字後的網址不做成連結', 'BODY1Xhttps://example.com/pBODY2X BODY3X', null],
   ['收斂 註解把網址截斷', 'https://example.com/p<!-- CMT1X -->BODY2X BODY3X', null],
   ['收斂 網址後強調裡的腳註引用', 'https://example.com/p***~~![^1]** BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
+  ['收斂 ![^1] 不算腳註引用', 'BODY1X![^1] BODY2X\n\n[^1]: CMT3X', 'unsupported_syntax'],
+  ['收斂 括號加強調包網址', 'BODY0X a@example.com(www.example.com**[^1]***) BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
+  ['收斂 實體字後的網址', '~~BODY1X&amp;https://example.com/p~~BODY2X BODY3X', 'unsupported_syntax'],
+  ['收斂 巢狀中括號連結後接腳註', '[BODY1X](https://example.com)[_[BODY2X](https://example.com)*](https://example.com)[^1] BODY3X\n\n[^1]: CMT4X', 'unsupported_syntax'],
+  ['收斂 網址當連結文字不擋', 'BODY1X：[https://example.com/](https://example.com/) BODY2X', null],
+  ['收斂 查詢字串與底線的網址不擋', 'BODY1X https://example.com/News_Content.aspx?n=1&s=2 BODY2X', null],
   ['複審 縮排碼後不從 1 開始的有序清單', '\t<!--CODE1X-->\n2)     <!--CMT2X--> BODY3X', 'unsupported_syntax'],
 ];
 

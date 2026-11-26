@@ -288,7 +288,54 @@ function bareUrlBefore(srcTail: string): boolean {
 }
 const fnLabel = (l: string) => l.toLowerCase().toUpperCase().toLowerCase();
 
+/**
+ * 緊貼寫法的總檢查（判不準就擋）：一串不含空白的字裡，
+ * ① 裸網址（http(s)://、www.）後面還緊貼著 [ * ` 這類記號（或前面緊貼實體字）：網站會把它們全吞進網址，信裡卻當成語法；
+ * ② 出現 ![^：網站不當腳註引用；
+ * ③ 腳註引用前面有巢狀中括號：網站的切法判不準。
+ * 程式碼片段的內容先遮掉不看。
+ */
+function gluedProblem(s: string): string | null {
+  let masked = '';
+  for (let i = 0; i < s.length; ) {
+    if (s[i] === '`') {
+      const span = codeSpanAt(s, i);
+      if (span) {
+        masked += '`' + ' '.repeat(Math.max(0, span.end - i - 2)).replace(/ /g, '\u0001') + '`';
+        i = span.end;
+        continue;
+      }
+    }
+    masked += s[i++];
+  }
+  for (const tok of masked.split(/\s+/)) {
+    if (!tok) continue;
+    if (tok.includes('![^')) return tok;
+    const u = tok.search(/https?:\/\/|www\./i);
+    // ](網址)、<網址>、[網址](…)（網址當連結文字）、href="網址"（HTML 屬性）裡的網址不是裸網址
+    if (u >= 0 && !/(?:\]\(|<|\[|=["'])$/.test(tok.slice(0, u)) && GLUE_AFTER_URL.test(tok.slice(u))) return tok;
+    // 實體字（&amp; 等）緊接網址：網站解碼後的切法跟信裡不同
+    if (u > 0 && /&[A-Za-z0-9#]+;$/.test(tok.slice(0, u))) return tok;
+    const f = tok.search(/\[\^[^\]\s]+\]/);
+    if (f > 0) {
+      let d = 0;
+      for (const ch of tok.slice(0, f)) {
+        if (ch === '[') d++;
+        else if (ch === ']') d = Math.max(0, d - 1);
+        if (d >= 2) return tok;
+      }
+    }
+  }
+  return null;
+}
+// 網址本身常有 _ & ~ !（查詢字串、維基檔名），不算；只看會被信裡當成語法的 [ * `
+const GLUE_AFTER_URL = /[[*`]/;
+
 function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
+  if (depth === 0 && !ctx.inLink) {
+    const g = gluedProblem(s);
+    if (g) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址、腳註引用、強調記號沒有空格緊貼在一起，網站上的切法判不準；請在網址前後加空格', where: clip(g) });
+  }
   const out: Inline[] = [];
   let buf = '';
   const flush = () => {
