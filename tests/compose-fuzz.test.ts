@@ -25,7 +25,7 @@ test(`隨機探測：${N} 份（種子 ${SEED}），三條不變式零違反`, (
 });
 
 // ───────── 五輪覆核留下的每一個反例＋本輪探測找到的寫法：固定下來，跟參照渲染器比對 ─────────
-// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的。
+// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的。
 // 名稱、原稿（只有正文）、預期：null＝正確處理（不記 error），字串＝必須記這個 error 擋下
 const REVIEW_CASES: [string, string, string | null][] = [
   ['r1 沒收尾註解', 'BODY1X\n\n<!-- CMT2X\n\nBODY3X', 'unclosed_comment'],
@@ -72,6 +72,20 @@ const REVIEW_CASES: [string, string, string | null][] = [
   ['本輪 框說明有反引號', '```a`b <!-- CMT1X --> BODY2X', null],
   ['本輪 段落後 setext 前註解', 'BODY1X <!-- CMT2X\n===\nBODY3X -->', 'unclosed_comment'],
   ['本輪 div 後沒空行', '<div>\n`BODY1X <!-- CMT2X -->`\n</div>', 'unsupported_html'],
+  ['審查 單獨一行的 <em>', '<em>\n`<!-- CMT1X -->`\n</em>', 'unsupported_html'],
+  ['審查 單獨一行的 <br>', '<br>\n`<!-- CMT1X -->`', 'unsupported_html'],
+  ['審查 單獨一行的 <a>', '<a href="https://example.com/a">\n`BODY1X <!-- CMT2X -->`\n</a>', 'unsupported_html'],
+  ['審查 引言後 tab', '>  \t<!-- CMT1X -->\n\nBODY2X', null],
+  ['審查 引言後直接 tab', '>\t<!-- CMT1X -->\n\nBODY2X', null],
+  ['審查 引言清單後 tab', '> - \t<!-- CODE1X -->', null],
+  ['審查 表頭沒有 |', 'BODY1X\n| --- |\n    CODE2X <!-- CODE3X -->', null],
+  ['審查 表頭沒有 | 加註解', 'BODY1X\n:-- |\n`a | <!-- CMT2X --> b`', null],
+  ['審查 懶惰續行遇標籤行', '- BODY1X <!-- CMT2X\n<span>\nBODY3X -->', 'unclosed_comment'],
+  ['審查 引言裡標籤行後接縮排碼', '> <br>\n    CODE1X <!-- CODE2X -->', 'unsupported_html'],
+  ['審查 <? 偽註解', 'BODY1X <?x CMT2X ?> BODY3X', 'unsupported_html'],
+  ['審查 <!X 偽註解', '<!X CMT1X>\n\nBODY2X', 'unsupported_html'],
+  ['審查 CDATA', '<![CDATA[\nCMT1X\n]]>\nBODY2X', 'unsupported_html'],
+  ['審查 參照式連結定義', '[ref]: https://example.com/x "CMT1X"\n\nBODY2X', 'unsupported_syntax'],
 ];
 
 test('覆核反例：每一個都正確處理或記 error，且結果與網站（參照渲染器）一致', () => {

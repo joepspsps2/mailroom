@@ -309,6 +309,15 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       i = e;
       continue;
     }
+    if (ch === '<' && PSEUDO_COMMENT.test(s.slice(i, i + 9))) {
+      flush();
+      ctx.problems.push({ code: 'unsupported_html', severity: 'error', message: '原稿有 <? 、<!X 或 <![CDATA[ 開頭的寫法，網站上會被當成註解藏起來，信裡做不到；請拿掉', where: clip(s.slice(i)) });
+      const close = s.indexOf('>', i);
+      const end = close < 0 ? s.length : close + 1;
+      ctx.hidden += marks(s.slice(i, end));
+      i = end;
+      continue;
+    }
     if (ch === '!' && s[i + 1] === '[') {
       const close = matchBracket(s, i + 1);
       if (close > 0 && s[close + 1] === '(') {
@@ -421,6 +430,12 @@ const COMMENT_START = /^ {0,3}<!--/;
 /** 會打斷段落的其他 HTML 區塊開頭（CommonMark 第 1、3～6 型）。 */
 const HTML_INTERRUPT = /^ {0,3}(?:<(?:script|pre|style|textarea)(?:[\s>]|$)|<\?|<![A-Za-z]|<!\[CDATA\[|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[\s>]|\/>|$))/i;
 const BLOCK_HTML = /^ {0,3}<\/?[a-zA-Z!]/;
+/** 一行只有一個完整標籤（CommonMark HTML 區塊第 7 型）：網站原樣輸出到空行為止，不轉 markdown；不能打斷段落，但會切斷懶惰續行。 */
+const LONE_TAG = /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*?)?\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
+/** 瀏覽器當成註解藏起來的另外三種寫法（<?…>、<!X…>、<![CDATA[…]]>）：信裡沒法照做，一律記 error。 */
+const PSEUDO_COMMENT = /<(?:\?|![A-Za-z]|!\[CDATA\[)/;
+/** 參照式連結定義（[名稱]: 網址）：網站上不顯示，信裡不支援，記 error（不然網站看不到的字會寄出去）。 */
+const LINK_REF_DEF = /^ {0,3}\[(?!\^)[^\]]+\]:/;
 const DIV_WRAPPER = /^ {0,3}(?:<div(?:\s+lang\s*=\s*(?:"[A-Za-z-]*"|'[A-Za-z-]*'))?\s*>|<\/div\s*>)\s*$/i;
 const TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 /** 懶惰續行的記號：引言或清單收進來的「沒縮排、接在段落後面」的行，在內層一律當段落續行（不能變成表頭或標題底線）。 */
@@ -517,22 +532,22 @@ function splitRow(line: string): string[] {
 }
 
 function isTableStart(line: string, next: string | undefined): boolean {
-  return line.includes('|') && line.trim() !== '' && next !== undefined && TABLE_SEP.test(next) && next.includes('|') && splitRow(line).length === splitRow(next).length;
+  return line.trim() !== '' && next !== undefined && TABLE_SEP.test(next) && next.includes('|') && splitRow(line).length === splitRow(next).length;
 }
 
 /** 這一行能不能打斷同一層正在進行的段落（CommonMark 的規則：有序清單要從 1 開始、空項目不行、縮 4 格以上不行）。 */
-function interrupts(line: string, next: string | undefined): boolean {
+function interrupts(line: string, next: string | undefined, tables = true): boolean {
   if (indentCols(line) >= 4) return false;
   if (fenceOpen(line) || HR.test(line) || ATX.test(line) || QUOTE.test(line) || COMMENT_START.test(line) || HTML_INTERRUPT.test(line)) return true;
   const lm = listMarker(line);
   if (lm && !lm.empty && (!lm.ordered || lm.start === 1)) return true;
-  return isTableStart(line, next);
+  return tables && isTableStart(line, next);
 }
 
 /** 懶惰續行（引言、清單裡沒縮排的下一行）：只有「內層最後是一個還開著的段落」才接得上；任何清單項目、區塊開頭都會斷開（表格不會：那時表頭只是段落續行）。 */
 function lazyBreaks(line: string): boolean {
   if (indentCols(line) >= 4) return false;
-  return !!fenceOpen(line) || HR.test(line) || ATX.test(line) || QUOTE.test(line) || COMMENT_START.test(line) || HTML_INTERRUPT.test(line) || listMarker(line) !== null;
+  return !!fenceOpen(line) || HR.test(line) || ATX.test(line) || QUOTE.test(line) || COMMENT_START.test(line) || HTML_INTERRUPT.test(line) || LONE_TAG.test(line) || listMarker(line) !== null;
 }
 
 /** 註解區塊收尾那一行，--> 後面剩下的字（網站上原樣當 HTML 顯示）：再藏掉裡面的註解，其他照字面留著。 */
@@ -684,6 +699,12 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       i++;
       continue;
     }
+    if (LINK_REF_DEF.test(line)) {
+      const start = line;
+      while (i < n && lines[i].trim() !== '') ctx.hidden += marks(lines[i++]);
+      ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '原稿有參照式連結定義（[名稱]: 網址），網站上不顯示、信裡不支援；請改成一般的 [文字](網址)', where: clip(start) });
+      continue;
+    }
     // 自訂區塊語法（:::note 之類）
     if (line.trim().startsWith(':::')) {
       const start = line;
@@ -692,7 +713,7 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       continue;
     }
     // 區塊 HTML
-    if (BLOCK_HTML.test(line) && ANY_TAG.test(line) && !INLINE_START.test(line)) {
+    if ((BLOCK_HTML.test(line) && ANY_TAG.test(line) && !INLINE_START.test(line)) || LONE_TAG.test(line) || /^ {0,3}<(?:\?|![A-Za-z]|!\[CDATA\[)/.test(line)) {
       const start = line;
       while (i < n && lines[i].trim() !== '') ctx.hidden += marks(lines[i++]);
       if (EMBED_TAG.test(start)) {
@@ -728,9 +749,10 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       const align = splitRow(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? 'center' : /^-+:$/.test(c) ? 'right' : /^:-+$/.test(c) ? 'left' : null));
       i += 2;
       const rows: Inline[][][] = [];
-      while (i < n && lines[i].trim() !== '' && indentCols(lines[i]) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1])) {
+      while (i < n && lines[i].trim() !== '' && indentCols(lines[i]) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1], false)) {
         const cells = splitRow(lines[i++]);
         while (cells.length < head.length) cells.push('');
+        for (const extra of cells.slice(head.length)) ctx.hidden += marks(extra); // 多出來的格子網站上也不顯示（表格裡再出現像表頭的兩行，也只是一般的列）
         rows.push(cells.slice(0, head.length).map((c) => parseInline(c, ctx)));
       }
       blocks.push({ t: 'table', head: head.map((c) => parseInline(c, ctx)), align, rows });
@@ -793,10 +815,23 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
   return { blocks, open: open && !unclosedHtml };
 }
 
+/**
+ * 行首的結構前綴（空白、tab、引言 >、清單記號）裡的 tab，照「絕對欄位」換成空白（CommonMark 的 tab 是跳到 4 的倍數）。
+ * 這樣拿掉 > 或清單記號之後，剩下的縮排欄數才不會算錯（例：「>\t<!--」是引言裡的註解，不是縮排程式碼）。
+ */
+function expandPrefixTabs(line: string): string {
+  const m = line.match(/^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)])(?=[ \t]|$))*[ \t]*/);
+  const pre = m ? m[0] : '';
+  if (!pre.includes('\t')) return line;
+  let out = '';
+  for (const ch of pre) out += ch === '\t' ? ' '.repeat(4 - (out.length % 4)) : ch;
+  return out + line.slice(pre.length);
+}
+
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const ctx: Ctx = { problems: [], hidden: 0, inCode: 0 };
-  const { blocks } = parseBlocks(body.split('\n'), ctx);
+  const { blocks } = parseBlocks(body.split('\n').map(expandPrefixTabs), ctx);
   // 對帳：原文每一個 <!--，不是被當成註解藏起來，就是落在程式碼裡；對不上＝有一個註解符號跑進了正文（或內容不見了），擋下。
   const total = marks(body);
   if (total !== ctx.hidden + ctx.inCode && !ctx.problems.some((p) => p.code === 'unclosed_comment')) {
