@@ -40,6 +40,7 @@ Over the service binding: `env.MAILROOM.unsubscribeLinks({ list, email, campaign
 | `POST /u/{token}` | Unsubscribes. The page button posts `reason=...`; mailbox providers post `List-Unsubscribe=One-Click` (RFC 8058). Repeating it returns the same success page and keeps the first timestamp and source. |
 | `POST /u/{token}/resubscribe` | "Pressed by mistake": restores the subscription with the same token, within 30 days, only for self-service unsubscribes (not complaints, imports or API removals), and not for suppressed addresses. |
 
+- The POST body may be urlencoded or multipart (RFC 8058 allows both) and is read as a stream, capped at 8 KB (413 above that).
 - An invalid token returns `404` with a generic page and no detail. A database failure returns `503` (providers retry one-click).
 - Pages send `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, a strict CSP and `noindex`; they run no script and load nothing external.
 - Unsubscribing affects **only that list** (`list_members`); it never touches other lists or the global suppression list.
@@ -59,8 +60,26 @@ Fields: `lang`, `confirmTitle`, `confirmBody`, `confirmButton`, `reasonLegend`, 
 ## Unsubscribe by email
 
 Route `unsubscribe@your-mail-domain` (Cloudflare Email Routing) to the Worker. Its `email()` handler looks for a token in the **subject**
-and unsubscribes (`unsub_source = 'mailto'`). It does not reply (no mail loops) and does not read the body. A mail without a valid token is
-only logged; wrap `handleUnsubMail` yourself if you want it forwarded to a person.
+and unsubscribes (`unsub_source = 'mailto'`). It does not reply (no mail loops) and does not read the body. An encoded subject (`=?UTF-8?B?...?=` or `?Q?`) is decoded before the token is looked for.
+
+### When an unsubscribe does not go through
+
+A reader who wrote in has clearly asked to stop, so these three cases raise an alert instead of disappearing:
+
+| Case | Alert `event` | What else happens |
+|---|---|---|
+| Mail without a token | `unsub_mail_no_token` | accepted; a person handles it |
+| Token fails verification (also on the web page) | `unsub_token_invalid` | page returns 404 |
+| Database write failed while handling a mail | `unsub_write_failed` | the mail is **rejected** with `setReject` (permanent SMTP rejection carrying a short "use the link instead" text), so the sender is told it did not work |
+
+The alert is a plain webhook, not tied to any service: `POST` JSON `{ event, at, from?, subject?, token?, via?, text, content }` to `UNSUB_ALERT_WEBHOOK`
+(https only; optional `UNSUB_ALERT_TOKEN` is sent as a Bearer token; 5-second timeout; a failing webhook never breaks request handling).
+`token` is the full token so a person can tell who it was. `text` and `content` hold the same one-line summary so common chat webhooks work through a small relay.
+
+**If `UNSUB_ALERT_WEBHOOK` is not set**, nothing is lost silently: the same full payload is written to the Worker log (`console.error`, visible only to the account owner),
+and a warning is logged once per isolate (and on each scheduled run).
+
+Why `setReject` and not `throw`: the Cloudflare docs only state that `setReject()` is a permanent SMTP error; they do not say what the sender sees when `email()` throws, so the documented call is used.
 
 ## Bounces and complaints
 
@@ -70,7 +89,7 @@ only logged; wrap `handleUnsubMail` yourself if you want it forwarded to a perso
 |---|---|
 | `bounce` / `permanent` | `suppressions` `hard_bounce`. Blocks **every** stream, including sign-in notices. List membership is left alone. |
 | `complaint` | `suppressions` `complaint` (blocks every stream) **and** every list the person is on becomes `unsubscribed` with `unsub_source = 'complaint'` (earlier self-unsubscribes keep their own time and source). |
-| `bounce` / `transient` | Not blocked. One row per (address, issue) in `bounce_streaks`; the same issue twice counts once. **Three different issues in a row** (no delivery in between) → treated as a hard bounce (`detail = transient_streak:3`). A transient bounce with no issue id is not counted. |
+| `bounce` / `transient` | Not blocked. Only `cause: 'mailbox'` bounces (mailbox full, receiving server temporarily down, recipient-side throttling) are counted: one row per (address, issue) in `bounce_streaks`, the same issue twice counts once. **Three different issues in a row** (no delivery in between) → treated as a hard bounce (`detail = transient_streak:3`). `cause: 'content'` (content or attachment rejected, message too large) says nothing about the mailbox and is **not** counted; a missing `cause` or a missing issue id is not counted either. |
 | `delivery` | Clears the address's transient streak. |
 
 Everything is idempotent: the same event twice leaves the same state. Lifting a suppression stays a manual act (`POST /v1/unsuppress`).
@@ -82,12 +101,16 @@ The provider layer (SNS verification, Resend webhooks, a fake provider in tests)
 
 ```ts
 await applyFeedback(db, { type: 'bounce', kind: 'permanent', email, source: 'ses', detail: 'NoEmail' });
-await applyFeedback(db, { type: 'bounce', kind: 'transient', email, campaign: 'weekly-7', source: 'ses' });
+await applyFeedback(db, { type: 'bounce', kind: 'transient', email, campaign: 'weekly-7', cause: 'mailbox', source: 'ses' });
 await applyFeedback(db, { type: 'complaint', email, source: 'ses' });
 await applyFeedback(db, { type: 'delivery', email });
 ```
 
-It returns `hard_bounce`, `complaint`, `transient_counted`, `transient_promoted`, `transient_no_campaign`, `delivery` or `rejected` (bad address or unknown type).
+Mapping for SES transient bounces: `General` and `MailboxFull` → `cause: 'mailbox'`; `ContentRejected`, `AttachmentRejected` and `MessageTooLarge` → `cause: 'content'`.
+
+The existing Resend webhook (`webhook.ts`) and Cloudflare event consumer (`cf-events.ts`) already go through `applyFeedback` for hard bounces and complaints, so a complaint from any provider also unsubscribes the person from every list. Their transient bounces and delivery events are not wired in yet (they carry no issue id).
+
+It returns `hard_bounce`, `complaint`, `transient_counted`, `transient_promoted`, `transient_no_campaign`, `transient_not_counted`, `delivery` or `rejected` (bad address or unknown type).
 
 ## Migration
 

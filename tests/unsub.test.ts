@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { addSuppression, suppressedReason } from '../src/core.ts';
 import { listMembers, listStatus, listSubscribe, upsertList } from '../src/lists.ts';
 import {
-  findUnsubToken, handleUnsubMail, handleUnsubRequest, pageText, resubscribeByClaims, signUnsubToken, unsubscribeLinks, unsubscribeLinksForEmail,
+  decodeMimeWords, findUnsubToken, handleUnsubMail, handleUnsubRequest, pageText, resubscribeByClaims, signUnsubToken, unsubscribeLinks, unsubscribeLinksForEmail,
   unsubscribeByClaims, unsubSecrets, verifyUnsubToken, type UnsubHandlerConfig,
 } from '../src/unsub.ts';
 import { count, listDb } from './lists-helpers.ts';
@@ -323,4 +323,67 @@ test('unsubscribeByClaims：券是真的但名單沒這個人 → not_found（�
   assert.deepEqual(await unsubscribeByClaims(db, { list: 'weekly', contactId: 424242 }, 'link'), { status: 'not_found' });
   const ok = (await handleUnsubRequest(db, cfg(), req('POST', `/u/${await signUnsubToken(secrets, { list: 'weekly', contactId: 424242 })}`, 'List-Unsubscribe=One-Click')))!;
   assert.equal(ok.status, 200);
+});
+
+// ---------- 第二輪：一鍵退訂格式、內文上限、主旨編碼 ----------
+
+test('一鍵退訂用 multipart 格式也算 one_click', async () => {
+  const { db, id, member } = await setup();
+  const token = await signUnsubToken(secrets, { list: 'weekly', contactId: id('a@example.com') });
+  const fd = new FormData();
+  fd.set('List-Unsubscribe', 'One-Click');
+  const res = (await handleUnsubRequest(db, cfg(), new Request(`https://u.example.com/u/${token}`, { method: 'POST', body: fd })))!;
+  assert.equal(res.status, 200);
+  assert.equal(member('weekly', 'a@example.com').unsub_source, 'one_click');
+  // 壞掉的 multipart 內文：不當一鍵、不當成有原因，但按鈕式退訂仍成立
+  const bad = (await handleUnsubRequest(db, cfg(), new Request(`https://u.example.com/u/${await signUnsubToken(secrets, { list: 'weekly', contactId: id('b@example.com') })}`, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=zzz' }, body: 'garbage' })))!;
+  assert.equal(bad.status, 200);
+  assert.equal(member('weekly', 'b@example.com').unsub_source, 'link');
+});
+
+test('內文上限：沒帶 content-length（串流）也在上限處停下，回 413 且不退訂', async () => {
+  const { db, id, member } = await setup();
+  const token = await signUnsubToken(secrets, { list: 'weekly', contactId: id('a@example.com') });
+  let pulled = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled += 1024;
+      controller.enqueue(new Uint8Array(1024).fill(97));
+      if (pulled > 5_000_000) controller.close();
+    },
+  });
+  const res = (await handleUnsubRequest(db, cfg(), new Request(`https://u.example.com/u/${token}`, { method: 'POST', body: stream, duplex: 'half' } as RequestInit)))!;
+  assert.equal(res.status, 413);
+  assert.ok(pulled < 100_000, `讀了 ${pulled} bytes`);
+  assert.equal(member('weekly', 'a@example.com').status, 'subscribed');
+});
+
+test('主旨被編碼成 =?UTF-8?B?…?= 或 Q 編碼（含拆成多段）也找得到券', async () => {
+  const { db, id, member } = await setup();
+  const token = await signUnsubToken(secrets, { list: 'weekly', contactId: id('a@example.com') });
+  const zh = btoa(String.fromCharCode(...new TextEncoder().encode('取消訂閱 ')));
+  assert.equal(decodeMimeWords(`=?UTF-8?B?${zh}?=ok`), '取消訂閱 ok');
+  assert.equal(decodeMimeWords('plain'), 'plain');
+  assert.equal(decodeMimeWords('=?x-unknown?B?abc?='), '=?x-unknown?B?abc?=');
+  const b64 = `=?UTF-8?B?${btoa('Re: ' + token)}?=`;
+  assert.equal(await handleUnsubMail(db, cfg(), { subject: b64 }), 'unsubscribed');
+  assert.equal(member('weekly', 'a@example.com').unsub_source, 'mailto');
+  const half = Math.floor(token.length / 2);
+  const qEnc = (x: string) => x.replace(/_/g, '=5F'); // Q 編碼裡底線代表空白，真的底線要寫成 =5F
+  const split = `=?UTF-8?Q?${qEnc(token.slice(0, half))}?= =?UTF-8?Q?${qEnc(token.slice(half))}?=`;
+  assert.equal(decodeMimeWords(split), token);
+  const t2 = await signUnsubToken(secrets, { list: 'weekly', contactId: id('b@example.com') });
+  const q = `=?UTF-8?Q?${qEnc(t2.slice(0, 20))}?= =?UTF-8?Q?${qEnc(t2.slice(20))}?=`;
+  assert.equal(await handleUnsubMail(db, cfg(), { subject: q }), 'unsubscribed');
+  assert.equal(member('weekly', 'b@example.com').status, 'unsubscribed');
+});
+
+test('收信退訂寫入失敗：回 failed 並呼叫 onWriteFailed（帶完整券與寄件人）', async () => {
+  const { id, db } = await setup();
+  const token = await signUnsubToken(secrets, { list: 'weekly', contactId: id('a@example.com') });
+  const got: unknown[] = [];
+  const broken = { prepare: () => { throw new Error('d1 down'); } };
+  assert.equal(await handleUnsubMail(broken, cfg({ onWriteFailed: (i) => void got.push(i) }), { from: 'a@example.com', subject: token }), 'failed');
+  assert.deepEqual(got, [{ token, claims: { list: 'weekly', contactId: id('a@example.com'), campaign: null }, from: 'a@example.com' }]);
+  void db;
 });

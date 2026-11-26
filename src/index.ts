@@ -18,7 +18,9 @@ import { handleCfEvent } from './cf-events.ts';
 import { listMembers, listStatus, listSubscribe, listUnsubscribe, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
 import { bearer, json, notFound, sameToken } from './http.ts';
 import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
-import { handleUnsubMail, handleUnsubRequest, pageText, unsubscribeLinksForEmail, unsubSecrets, type UnsubHandlerConfig, type UnsubLinks } from './unsub.ts';
+import { handleUnsubRequest, unsubscribeLinksForEmail, unsubSecrets, type UnsubLinks } from './unsub.ts';
+import { handleEmailMessage, unsubConfig } from './unsub-wiring.ts';
+import { warnIfNoAlert } from './alert.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
 import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
@@ -61,6 +63,10 @@ export interface Env extends BroadcastEnv {
   UNSUB_BASE_URL?: string;
   /** 收退訂信的地址（Email Routing 轉進本 Worker 的 email()），例 unsubscribe@mail.example.com。 */
   UNSUB_MAILTO?: string;
+  /** 讀者退訂沒成功時的告警 webhook（https，POST JSON：event、from、subject、token、at、text）。沒設＝只寫 log，並警告。見 docs/unsubscribe.md。 */
+  UNSUB_ALERT_WEBHOOK?: string;
+  /** 選填：告警 webhook 的 Bearer 口令（Secret）。 */
+  UNSUB_ALERT_TOKEN?: string;
   /** 退訂頁文字（JSON 物件，只寫想改的欄位，見 docs/unsubscribe.md）。 */
   UNSUB_PAGE?: string | Record<string, unknown>;
   [key: `HTTP_KEY_${string}`]: string | undefined;
@@ -157,15 +163,6 @@ async function report(env: Env, days: number) {
   ).bind(since).all();
   const suppressions = await env.DB.prepare('SELECT reason, source, COUNT(*) AS n FROM suppressions WHERE created_at >= ? GROUP BY reason, source').bind(since).all();
   return { since, rows: rows.results, suppressions: suppressions.results };
-}
-
-function unsubConfig(env: Env): UnsubHandlerConfig {
-  return {
-    secrets: unsubSecrets(env.UNSUB_TOKEN_SECRET, env.UNSUB_TOKEN_SECRET_PREVIOUS),
-    text: pageText(env.UNSUB_PAGE as string | undefined),
-    // 券驗不過只記 log（不含完整券）；要轉管理員通知，由私有設定的部署包一層。
-    onInvalidToken: (token, via) => console.warn('unsubscribe token rejected', via, token.slice(0, 8)),
-  };
 }
 
 /** 內線入口（RPC）。 */
@@ -333,16 +330,16 @@ export default {
     }
   },
 
-  /** 退訂信（Cloudflare Email Routing）：主旨帶退訂券就退訂；沒券的只記 log，由私有設定決定怎麼轉人工。 */
+  /** 退訂信（Cloudflare Email Routing）：主旨帶退訂券就退訂；沒成功的情況都通知人工，見 unsub-wiring.ts。 */
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
-    const outcome = await handleUnsubMail(env.DB, { ...unsubConfig(env), onNoToken: () => console.warn('unsubscribe mail without token') }, { from: message.from, subject: message.headers.get('subject') });
-    console.log('unsubscribe mail', outcome);
+    await handleEmailMessage(env.DB, env, message);
   },
 
   /** 試跑期每日演習（DAILY_DRILL）。 */
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     // 群發先跑（煞車不能被後面的雜事拖累）：每分鐘放水、踩煞車、寄完對帳；沒設定群發就什麼都不做。
     await broadcastTick(env).catch((e) => console.error('broadcast tick failed', e instanceof Error ? e.message : 'unknown'));
+    warnIfNoAlert(env.UNSUB_ALERT_WEBHOOK);
     const out = await dailyDrill(env);
     if (out.length) console.log('daily drill', out.join(','));
     const days = retentionDays(env.LEDGER_RETENTION_DAYS);

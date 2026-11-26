@@ -54,7 +54,7 @@ test('檢舉：已經自己退訂的人，保留原本的退訂時間與來源�
 
 test('暫時性退信：單次不擋、同一期重送不重複計數；連續 3 期（三個不同的期）才當硬退信', async () => {
   const { db } = await setup();
-  const soft = (campaign: string | null) => applyFeedback(db, { type: 'bounce', kind: 'transient', email: 'a@example.com', campaign, source: 'ses' });
+  const soft = (campaign: string | null) => applyFeedback(db, { type: 'bounce', kind: 'transient', email: 'a@example.com', campaign, cause: 'mailbox', source: 'ses' });
   assert.equal(await soft('weekly-1'), 'transient_counted');
   assert.equal(await soft('weekly-1'), 'transient_counted'); // 同一期重送
   assert.equal(await soft('weekly-2'), 'transient_counted');
@@ -67,7 +67,7 @@ test('暫時性退信：單次不擋、同一期重送不重複計數；連續 3
 
 test('暫時性退信：中間有送達就從頭算；沒有期別的不計入；門檻可調；永久退信與檢舉清掉紀錄', async () => {
   const { db } = await setup();
-  const soft = (email: string, campaign: string | null, opts = {}) => applyFeedback(db, { type: 'bounce', kind: 'transient', email, campaign, source: 'ses' }, opts);
+  const soft = (email: string, campaign: string | null, opts = {}) => applyFeedback(db, { type: 'bounce', kind: 'transient', email, campaign, cause: 'mailbox', source: 'ses' }, opts);
   await soft('a@example.com', 'weekly-1');
   await soft('a@example.com', 'weekly-2');
   assert.equal(await applyFeedback(db, { type: 'delivery', email: 'a@example.com' }), 'delivery');
@@ -107,4 +107,21 @@ test('成員清單的 suppressed 欄與 listStatus 同口徑：訂閱中但在�
   const again = (await listMembers(db, { list: 'weekly' })) as { members: Array<{ email: string; status: string; suppressed: boolean }> };
   const b = again.members.find((m) => m.email === 'b@example.com')!;
   assert.deepEqual([b.status, b.suppressed], ['unsubscribed', true]);
+});
+
+test('暫時退信的種類：內容被拒這類跟信箱無關的不累計；沒給種類也不累計（寧可少擋）', async () => {
+  const { db } = await setup();
+  for (const [i, cause] of ([['1', 'content'], ['2', 'content'], ['3', 'content'], ['4', undefined], ['5', undefined]] as const)) {
+    const out = await applyFeedback(db, { type: 'bounce', kind: 'transient', email: 'a@example.com', campaign: `weekly-${i}`, cause: cause as never, source: 'ses' });
+    assert.equal(out, 'transient_not_counted');
+  }
+  assert.equal(count(db, 'bounce_streaks'), 0);
+  assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), null);
+  // 內容被拒夾在信箱層級退信中間，不會幫忙湊滿，也不會中斷
+  const soft = (campaign: string, cause: 'mailbox' | 'content') => applyFeedback(db, { type: 'bounce', kind: 'transient', email: 'b@example.com', campaign, cause, source: 'ses' });
+  await soft('weekly-1', 'mailbox');
+  await soft('weekly-2', 'content');
+  await soft('weekly-3', 'mailbox');
+  assert.equal(count(db, 'bounce_streaks', "email = 'b@example.com'"), 2);
+  assert.equal(await soft('weekly-4', 'mailbox'), 'transient_promoted');
 });

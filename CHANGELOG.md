@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Unsubscribe follow-ups.** Failed unsubscribes no longer vanish: mail without a token, a token that fails verification and a database failure while handling a mail raise an alert to `UNSUB_ALERT_WEBHOOK` (optional `UNSUB_ALERT_TOKEN`), always with the full detail in the log; a failed write also rejects the mail (`setReject`). Encoded (MIME) subjects are decoded; one-click POSTs accept multipart and are read with a streaming size cap; transient bounces carry a `cause` and only mailbox-level ones count toward the three-in-a-row rule; the Resend and Cloudflare event routes now call `applyFeedback`, so a complaint unsubscribes the person from every list.
+
 - **Unsubscribe and feedback** (see `docs/unsubscribe.md`). Signed unsubscribe tokens, `List-Unsubscribe` / one-click headers, `GET`/`POST /u/{token}` (GET only shows a confirmation page), resubscribe within 30 days, unsubscribe by email (`email()` handler), and `applyFeedback` for bounces and complaints (hard bounce and complaint → global suppression; three transient bounces in a row → hard bounce). New migration `0007_unsubscribe.sql`. `listMembers` rows now include `suppressed` and `unsubReason`. The list admin routes moved to `src/list-routes.ts` and reject a non-object `expected`. Set `UNSUB_TOKEN_SECRET` (and `UNSUB_BASE_URL`) to enable; nothing changes for existing sends.
 
 - **Newsletter lists** (see `docs/lists.md`). New D1 migration `0005_lists.sql` (`contacts`, `lists`, `list_members`); internal `listSubscribe` / `listUnsubscribe` / `listStatus` / `listMembers`; admin endpoints `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments`. Nothing changes for existing sends.
