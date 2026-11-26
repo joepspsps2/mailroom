@@ -510,6 +510,10 @@ function parseInline(s: string, ctx: Ctx, depth = 0, off = 0): Inline[] {
           ctx.inLink--;
           // 連結文字裡又有連結：網站不把外層當連結，外層的 (網址) 是裸網址，不記成收好的目的地
           if (!hasLink(c)) ctx.dest.push([off + close + 1, off + u[1]]);
+          else {
+            // 網站不把外層當連結：外層的 [、](網址) 都照字面顯示。信裡做不到一模一樣（會變成巢狀連結、少掉那幾個字），擋下。
+            ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '連結文字裡又有一個連結：網站不會把外層當成連結（外層的方括號與網址會照字面顯示），信裡會少字；請把裡面那個連結拿出來', where: clip(s.slice(i, u[1])) });
+          }
           out.push({ t: 'link', href: u[0], c });
           i = u[1];
           continue;

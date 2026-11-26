@@ -724,3 +724,8 @@ test('腳註引用緊貼在包著裸網址的括號、強調記號後面：網�
     assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), [], `不該擋：${body}`);
   }
 });
+
+test('a link inside link text is blocked (the site shows the outer brackets and URL literally)', () => {
+  const r = compose({ source: '前 [[內](https://example.com/x) 外](https://example.com/y) 後\n', template: createTemplate({ brandName: 'X', postalAddress: '1 Example Street' }), issue: 't-1' });
+  assert.ok(r.problems.some((p) => p.severity === 'error' && p.code === 'unsupported_syntax' && /連結文字裡又有一個連結/.test(p.message)));
+});
