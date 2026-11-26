@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.1
+
+### Upgrading from 0.3.0
+
+- **Two new D1 migrations, both additive:** `0008_tracking.sql` (adds `campaigns.links`) and `0009_welcome.sql` (adds `welcome_mails`). Existing rows are untouched; issues stored by 0.3.0 keep their content hash (the link table only enters the hash when present), so an approved 0.3.0 issue stays approved. Apply them before the new code runs (`npm run deploy` does).
+- **New optional settings** (nothing changes until you set them): `TRACK_BASE_URL`, `TRACK_TOKEN_SECRET` (Secret), `TRACK_TOKEN_SECRET_PREVIOUS`, `TRACK_CONFIG` — see `docs/tracking.md`. Route the tracking host to the Worker. The welcome mail needs no new setting; it is stored per list and is off until switched on.
+- **Behaviour changes:**
+  - `listSubscribe` answers `{ status: 'subscribed', firstTime: boolean }` instead of `{ status: 'subscribed' }`. Callers that read `status` are unaffected; callers that compare the whole object must accept the extra field.
+  - Issues composed with `trackBase` now need `TRACK_TOKEN_SECRET` and a matching `TRACK_BASE_URL`: without them (or when the tracking links are not under `TRACK_BASE_URL`) rendering fails and the issue pauses (`render_error`) — it never sends dead tracking links. `saveDraft` refuses `{{c:N}}` placeholders that have no entry in the issue's link table (`links_missing`); the desk command `create` sends the link table automatically. Issues created with the 0.3.0 command and `trackBase` must be created again.
+  - Compose and pre-send check: bare URLs now run to the next whitespace or `<`, as on a GFM site (non-ASCII paths stay part of the URL and are percent-encoded in the destination; before, the link stopped at the first non-ASCII character and pointed to the wrong page). The plain-text version prints `text (tracked URL)` for every tracked link whose text is not the printed URL, so no word of the link text is lost. New errors (`unsupported_syntax`): a footnote reference the site would absorb into a bare URL, and a link inside the text of another link. New warning `url_glued_text` when a bare URL ends in full-width punctuation. Link text is no longer auto-linked a second time. Re-run `create` for drafts made with 0.3.0.
+  - While newsletters are enabled and a list's welcome mail is switched on, a first-time subscriber gets one welcome mail (counts toward the daily cap).
+  - **A complaint about a newsletter no longer blocks transactional mail.** Complaints that come back through the newsletter postman record the `unsubscribe` suppression ("no newsletters at all", `detail` starting `complaint`) instead of `complaint`: newsletters stop, sign-in and notification mail keep going. Complaints about transactional mail and hard bounces still block everything. Existing `complaint` rows keep blocking everything; nothing is migrated. The import status `complained` still records `complaint` (blocks everything). For callers of the list API nothing changes in meaning: the person is unsubscribed from every list, `listStatus` answers `unsubscribed` (`blocked` for someone who is not a member), `listMembers` rows have `suppressed: true`, and their own subscribe answers `blocked` until the suppression is lifted with `POST /v1/unsuppress` (`reasons: ["unsubscribe"]`). The only visible difference: `send()` to that address now answers `sent` instead of `suppressed`.
+  - Tracking link destinations are stored normalised (non-ASCII paths percent-encoded).
+
+### New
+
+- **Compose rewrite** (#16): HTML comments, code and blocks are decided in one CommonMark-style pass; leaked-comment safety nets; randomized comparison against a reference renderer (`tests/compose-fuzz.test.ts`).
+- **Compose fixes**: bare URLs with text or non-ASCII characters right after them, footnote references glued to URLs, nested links (see the behaviour changes above); randomized comparison baseline updated in `docs/composing.md`.
+- **Click and open tracking** (`docs/tracking.md`): `GET /c/{token}` redirects only to a link stored with the issue, `GET /o/{token}.gif` serves the pixel. Signed per-recipient tokens (HMAC-SHA-256, rotation supported); forged tokens get the same 404 without a database read; events carry no addresses; writes happen after the response and a failed write still redirects. Dedupe windows, scanner marking (`burst`, `HEAD`, configured networks) and an explicit `detail.prefetch = true` for opens from Apple's network (configurable). Test mail redirects without recording.
+- **Newsletter complaints stop newsletters only** (`docs/unsubscribe.md`): `applyFeedback` complaint events take `scope: 'all' | 'marketing'`; lifting a newsletter complaint needs `reasons: ["unsubscribe", "complaint"]`.
+- **Welcome mail** (`docs/welcome.md`): one mail for first-time subscribers through the newsletter postman with unsubscribe headers, deduplicated by the ledger key `welcome:{list}:{contact}`; never for re-subscribes, imports or suppressed addresses; nothing while newsletters are switched off. Admin route `PUT`/`GET /v1/lists/{id}/welcome` and desk command `welcome`. Names are only used when they pass an allowlist (letters, marks, spaces, apostrophes, hyphens, initials).
+
 ## 0.3.0
 
 This release also contains everything planned for 0.2.0, which was never published on its own: install 0.3.0 directly.

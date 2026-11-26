@@ -68,7 +68,19 @@ function tagProblem(tag: string, inline: boolean): { message: string; where: str
   return { message: '原稿有看起來像 HTML 標籤的文字（角括號包著的字），引擎會當成標籤而排不出來；如果它不是標籤，請改寫（拿掉角括號，或用反引號包起來）', where };
 }
 
-const URL_RE = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/g;
+// 非 ASCII 的字（中日韓文、全形標點）也算網址的一部分，跟網站一樣：維基條目、商品頁的中文路徑要整串連過去；
+// 只有空白（含全形空白、不換行空白）和 < 會讓網址結束。私用區字元是引擎自己的記號（例：跳脫的大括號），不算。
+const URL_RE = /https?:\/\/(?:[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]|[^\x00-\x7F\s\uE000-\uF8FF])+/g;
+/** 網址裡的非 ASCII 字照網站的寫法轉成 %XX（UTF-8），連結目的地才跟網站一樣、也能安全放進轉址標頭。 */
+function encodeNonAscii(u: string): string {
+  return u.replace(/[^\x00-\x7F]+/g, (m) => {
+    try {
+      return encodeURIComponent(m);
+    } catch {
+      return encodeURIComponent(m.replace(/[\uD800-\uDFFF]/g, '\uFFFD'));
+    }
+  });
+}
 
 function splitFrontmatter(src: string): { body: string; fm: Record<string, string> } {
   const text = src.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
@@ -107,12 +119,16 @@ interface Ctx {
   refs: Set<string>;
   inDef: boolean;
   inLink: number;
+  /** 正在轉 [文字](網址) 的連結文字（網站在這裡面不做自動連結）。 */
+  mdLink: number;
   /** 正在轉的強調緊接在裸網址後面（網站會把整串吞進網址，裡面的腳註引用不算）。 */
   urlCtx: number;
+  /** 這段行內內容裡，信裡真的收成連結目的地的範圍（在最外層原稿裡的位置）：裡面的網址不是裸網址。 */
+  dest: [number, number][];
   /** 最近一段合格腳註定義結束在哪一行（只在最外層用）：之後空行＋縮排的行＝網站上可能屬於腳註的續段，判不準。 */
   lastDefEnd: number;
 }
-const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0, urlCtx: 0, lastDefEnd: -1 });
+const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0, mdLink: 0, urlCtx: 0, dest: [], lastDefEnd: -1 });
 const scratch = newCtx;
 /** 行首空白裡有 tab。 */
 const tabLead = (l: string) => /^[ \t]*\t/.test(l.startsWith(LAZY) ? l.slice(1) : l);
@@ -249,7 +265,7 @@ function readParenUrl(s: string, start: number): [string, number] | null {
 function trimUrlTail(u: string): string {
   // 網址尾巴的標點不算網址
   let end = u.length;
-  while (end > 0 && /[.,;:!?'*]/.test(u[end - 1])) end--;
+  while (end > 0 && /[.,;:!?'*_~\]]/.test(u[end - 1])) end--;
   // 不成對的右括號也不算
   while (end > 0 && u[end - 1] === ')') {
     const sub = u.slice(0, end);
@@ -259,7 +275,9 @@ function trimUrlTail(u: string): string {
   return u.slice(0, end);
 }
 
-function autolink(text: string): Inline[] {
+/** 網址最後一個字是中日韓文的句讀或右括號（詳見https://….、（https://…））：多半是作者沒在網址後面空格。 */
+const CJK_PUNCT_END = /[，。、；：！？）」』】》〉]$/;
+function autolink(text: string, ctx?: Ctx): Inline[] {
   const out: Inline[] = [];
   let last = 0;
   for (const m of text.matchAll(URL_RE)) {
@@ -270,7 +288,9 @@ function autolink(text: string): Inline[] {
     // 網址前面緊接英文字母或數字（例：abchttps://…）：網站不做成連結，照字面留著
     if (at > 0 && /[A-Za-z0-9]/.test(text[at - 1])) continue;
     if (at > last) out.push({ t: 'text', v: text.slice(last, at) });
-    out.push({ t: 'link', href: url, c: [{ t: 'text', v: url }], bare: true });
+    // 網址緊貼全形標點（詳見https://…。、（https://…））：網站把標點算進網址（連結多半會壞），信裡照網站做，提醒作者
+    if (ctx && CJK_PUNCT_END.test(url)) ctx.problems.push({ code: 'url_glued_text', severity: 'warn', message: '網址後面緊貼著全形標點或文字，網站會把它們都算進網址（連結多半會壞）；信裡照網站的樣子做。請在網址和後面的字之間加空格', where: clip(url) });
+    out.push({ t: 'link', href: encodeNonAscii(url), c: [{ t: 'text', v: url }], bare: true });
     last = at + url.length;
   }
   if (last < text.length) out.push({ t: 'text', v: text.slice(last) });
@@ -281,11 +301,22 @@ function autolink(text: string): Inline[] {
 const URL_TAIL = /(?:https?:\/\/|www\.|[\w.+-]+@[\w-]+\.)/i;
 /** 腳註標籤比對：不分大小寫，照 Unicode 的大小寫折疊（ß＝ss、ς＝σ）。 */
 const EMAIL_TAIL = /[\w.+-]+@[\w-]+\./;
-/** 原稿這一串（不含空白）裡有裸網址：網站的自動連結會從網址一路吞到下一個空白（中間的 [..](..)、**、反引號都吞），只有 ](網址) 或 <網址> 裡的不算。 */
-function bareUrlBefore(srcTail: string): boolean {
-  const u = srcTail.search(/https?:\/\/|www\./i);
-  return u >= 0 && !/(?:\]\(|<)$/.test(srcTail.slice(0, u));
+/** 一串字裡每一個網址的開頭（https://www. 只算一次）。 */
+const URL_STARTS = /https?:\/\/(?:www\.)?|www\./gi;
+/**
+ * 原稿這一串（不含空白）裡有裸網址：網站的自動連結會從網址一路吞到下一個空白（中間的 [..](..)、**、反引號都吞）。
+ * 每一個網址都要看（不只第一個）；只有信裡真的收成連結目的地的才不算——[文字](網址)、![圖](網址)、<網址>、<a href>，
+ * 而且那個連結在網站上也得是連結（連結文字裡又有連結時，網站不把外層當連結，外層的 ](網址) 就變成裸網址）。
+ * at＝這一串在最外層原稿裡從哪裡開始；ctx.dest 記著這些連結目的地在最外層原稿裡的範圍。
+ */
+function bareUrlBefore(srcTail: string, at: number, ctx: Ctx): boolean {
+  for (const m of srcTail.matchAll(URL_STARTS)) {
+    const p = at + (m.index ?? 0);
+    if (!ctx.dest.some(([a, b]) => p >= a && p < b)) return true;
+  }
+  return false;
 }
+const hasLink = (ns: Inline[]): boolean => ns.some((n) => n.t === 'link' || ('c' in n && Array.isArray(n.c) && hasLink(n.c as Inline[])));
 const fnLabel = (l: string) => l.toLowerCase().toUpperCase().toLowerCase();
 
 /**
@@ -311,11 +342,28 @@ function gluedProblem(s: string): string | null {
   for (const tok of masked.split(/\s+/)) {
     if (!tok) continue;
     if (tok.includes('![^')) return tok;
-    const u = tok.search(/https?:\/\/|www\./i);
-    // ](網址)、<網址>、[網址](…)（網址當連結文字）、href="網址"（HTML 屬性）裡的網址不是裸網址
-    if (u >= 0 && !/(?:\]\(|<|\[|=["'])$/.test(tok.slice(0, u)) && GLUE_AFTER_URL.test(tok.slice(u))) return tok;
-    // 實體字（&amp; 等）緊接網址：網站解碼後的切法跟信裡不同
-    if (u > 0 && /&[A-Za-z0-9#]+;$/.test(tok.slice(0, u))) return tok;
+    // 一串裡的每一個網址都要看（例：<網址>_網址**…、![圖](網址)(www.…**…），不只第一個
+    for (let from = 0; ; ) {
+      URL_STARTS.lastIndex = from;
+      const m = URL_STARTS.exec(tok);
+      if (!m) break;
+      const u = m.index;
+      // 實體字（&amp; 等）緊接網址：網站解碼後的切法跟信裡不同
+      if (u > 0 && /&[A-Za-z0-9#]+;$/.test(tok.slice(0, u))) return tok;
+      // ](網址)、<網址>、[網址](…)（網址當連結文字）、href="網址"（HTML 屬性）裡的網址不是裸網址；
+      // 跳過整個網址再找下一個（存檔網址 https://web.archive.org/web/…/https://… 、app.www.… 裡面的不另算）
+      const wrap = tok.slice(0, u).match(/(?:\]\(|<|\[|=(["']))$/);
+      if (wrap) {
+        const close = wrap[0] === '](' ? ')' : wrap[0] === '<' ? '>' : wrap[0] === '[' ? ']' : wrap[1];
+        const end = tok.indexOf(close, u);
+        if (end < 0) break;
+        from = end + 1;
+        continue;
+      }
+      // 裸網址：網站一路吞到這一串結束，後面緊貼的 [ * ` 都會被吞進去；後面的網址也在它裡面，不必再看
+      if (GLUE_AFTER_URL.test(tok.slice(u))) return tok;
+      break;
+    }
     const f = tok.search(/\[\^[^\]\s]+\]/);
     if (f > 0) {
       let d = 0;
@@ -331,7 +379,9 @@ function gluedProblem(s: string): string | null {
 // 網址本身常有 _ & ~ !（查詢字串、維基檔名），不算；只看會被信裡當成語法的 [ * `
 const GLUE_AFTER_URL = /[[*`]/;
 
-function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
+function parseInline(s: string, ctx: Ctx, depth = 0, off = 0): Inline[] {
+  // off＝s 在最外層原稿裡從哪裡開始（腳註、強調前面有沒有裸網址，要對照 ctx.dest 的範圍）
+  if (depth === 0) ctx.dest = [];
   if (depth === 0 && !ctx.inLink) {
     const g = gluedProblem(s);
     if (g) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址、腳註引用、強調記號沒有空格緊貼在一起，網站上的切法判不準；請在網址前後加空格', where: clip(g) });
@@ -340,16 +390,21 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
   let buf = '';
   const flush = () => {
     if (buf) {
-      out.push(...autolink(buf));
+      // [文字](網址) 的連結文字裡，網站不再自動連結（連結裡不能有連結）；<a href> 裡的網站會自動連結，照做
+      out.push(...(ctx.mdLink ? [{ t: 'text', v: decodeEntities(buf) } as Inline] : autolink(buf, ctx)));
       buf = '';
     }
   };
   let i = 0;
   // 強調的內層：前面緊接裸網址時，網站把整串吞進網址，內層的腳註引用不算
-  const inner = (sub: string): Inline[] => {
-    const u = bareUrlBefore(s.slice(0, i).match(/\S*$/)![0]) || URL_TAIL.test(buf.match(/\S*$/)![0]);
+  const tailAt = () => {
+    const t = s.slice(0, i).match(/\S*$/)![0];
+    return [t, off + i - t.length] as const;
+  };
+  const inner = (from: number, to: number): Inline[] => {
+    const u = bareUrlBefore(...tailAt(), ctx) || URL_TAIL.test(buf.match(/\S*$/)![0]);
     if (u) ctx.urlCtx++;
-    const r = parseInline(sub, ctx, depth + 1);
+    const r = parseInline(s.slice(from, to), ctx, depth + 1, off + from);
     if (u) ctx.urlCtx--;
     return r;
   };
@@ -370,7 +425,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
     }
     if (ch === '`') {
       // 網址後面緊接反引號：網站會把反引號收進自動連結，程式碼的切法就跟信裡不同，判不準
-      if (URL_TAIL.test(buf.match(/\S*$/)![0]) || bareUrlBefore(s.slice(0, i).match(/\S*$/)![0])) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址後面緊接反引號，網站會把反引號當成網址的一部分；請在網址和反引號之間加空格', where: clip(buf.match(/\S*$/)![0] + s.slice(i, i + 20)) });
+      if (URL_TAIL.test(buf.match(/\S*$/)![0]) || bareUrlBefore(...tailAt(), ctx)) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址後面緊接反引號，網站會把反引號當成網址的一部分；請在網址和反引號之間加空格', where: clip(buf.match(/\S*$/)![0] + s.slice(i, i + 20)) });
       const span = codeSpanAt(s, i);
       if (span) {
         flush();
@@ -419,6 +474,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         const u = readParenUrl(s, close + 1);
         if (u) {
           flush();
+          ctx.dest.push([off + close + 1, off + u[1]]);
           out.push({ t: 'image', src: u[0], alt: s.slice(i + 2, close).replace(/\\(.)/g, '$1') });
           i = u[1];
           continue;
@@ -430,11 +486,15 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       const fn = s.slice(i).match(/^\[\^([^\]\s\\]+)\]/);
       // 接在網址後面（https://…[^1]、(www.…)[^1]）的不算：網站會把整串變成自動連結（只看還沒處理的字，連結的 ](網址) 不算）
       // 原稿這一串（例：*www.e.com*[^1]）裡有網址、又不是 [文字](網址) 或 <網址> 收好的，也不算
-      const srcTail = s.slice(0, i).match(/\S*$/)![0];
-      const inUrl = URL_TAIL.test(buf.match(/\S*$/)![0]) || bareUrlBefore(srcTail) || (EMAIL_TAIL.test(srcTail) && !srcTail.includes('](') && !srcTail.endsWith('>'));
-      if (fn && !inUrl && !ctx.urlCtx && s[i + fn[0].length] !== '(' && s[i + fn[0].length] !== ':') {
+      const [srcTail, tailStart] = tailAt();
+      const inUrl = URL_TAIL.test(buf.match(/\S*$/)![0]) || bareUrlBefore(srcTail, tailStart, ctx) || (EMAIL_TAIL.test(srcTail) && !srcTail.includes('](') && !srcTail.endsWith('>'));
+      const isRef = fn && s[i + fn[0].length] !== '(' && s[i + fn[0].length] !== ':';
+      if (isRef && !inUrl && !ctx.urlCtx) {
         if (!ctx.inDef) ctx.refs.add(fnLabel(fn[1]));
         if (ctx.inLink) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '連結文字裡有腳註引用，網站上不會做成連結；請把腳註移到連結外面', where: clip(fn[0]) });
+      } else if (isRef) {
+        // 網站把這個腳註引用吞進前面的網址（例：(www.…**[^1]**)、**https://…**[^1]），不顯示腳註；信裡分不出來，擋下
+        ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '腳註引用緊貼在網址（或包著網址的括號、強調記號）後面，網站會把它當成網址的一部分、不顯示腳註；請在網址和腳註引用之間加空格', where: clip(srcTail + fn[0]) });
       }
     }
     if (ch === '[' && depth < 3) {
@@ -444,8 +504,16 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         if (u) {
           flush();
           ctx.inLink++;
-          const c = parseInline(s.slice(i + 1, close), ctx, depth + 1);
+          ctx.mdLink++;
+          const c = parseInline(s.slice(i + 1, close), ctx, depth + 1, off + i + 1);
+          ctx.mdLink--;
           ctx.inLink--;
+          // 連結文字裡又有連結：網站不把外層當連結，外層的 (網址) 是裸網址，不記成收好的目的地
+          if (!hasLink(c)) ctx.dest.push([off + close + 1, off + u[1]]);
+          else {
+            // 網站不把外層當連結：外層的 [、](網址) 都照字面顯示。信裡做不到一模一樣（會變成巢狀連結、少掉那幾個字），擋下。
+            ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '連結文字裡又有一個連結：網站不會把外層當成連結（外層的方括號與網址會照字面顯示），信裡會少字；請把裡面那個連結拿出來', where: clip(s.slice(i, u[1])) });
+          }
           out.push({ t: 'link', href: u[0], c });
           i = u[1];
           continue;
@@ -463,6 +531,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       const auto = s.slice(i).match(AUTOLINK);
       if (auto) {
         flush();
+        ctx.dest.push([off + i, off + i + auto[0].length]);
         out.push({ t: 'link', href: auto[1], c: [{ t: 'text', v: auto[1] }], bare: true });
         i += auto[0].length;
         continue;
@@ -474,8 +543,9 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         const closeAt = findMark(s, i + a[0].length, '</a>');
         if (href && closeAt > 0) {
           flush();
+          ctx.dest.push([off + i, off + i + a[0].length]);
           ctx.inLink++;
-          const c = parseInline(s.slice(i + a[0].length, closeAt), ctx, depth + 1);
+          const c = parseInline(s.slice(i + a[0].length, closeAt), ctx, depth + 1, off + i + a[0].length);
           ctx.inLink--;
           out.push({ t: 'link', href: decodeEntities(href[1] ?? href[2] ?? ''), c });
           i = closeAt + 4;
@@ -489,7 +559,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         const closeAt = findMark(s, i + fmt[0].length, `</${name}>`);
         if (closeAt > 0) {
           flush();
-          out.push({ t: name === 'b' || name === 'strong' ? 'strong' : 'em', c: inner(s.slice(i + fmt[0].length, closeAt)) });
+          out.push({ t: name === 'b' || name === 'strong' ? 'strong' : 'em', c: inner(i + fmt[0].length, closeAt) });
           i = closeAt + name.length + 3;
           continue;
         }
@@ -509,7 +579,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       const end = findMark(s, i + mark.length, mark);
       if (end > i + mark.length && !/^\s/.test(s[i + mark.length]) && !/\s$/.test(s.slice(i + mark.length, end))) {
         flush();
-        out.push({ t: strong ? 'strong' : 'em', c: inner(s.slice(i + mark.length, end)) });
+        out.push({ t: strong ? 'strong' : 'em', c: inner(i + mark.length, end) });
         i = end + mark.length;
         continue;
       }
@@ -519,7 +589,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       const end = findMark(s, i + 1, '_');
       if (end > i + 1 && !/[A-Za-z0-9]/.test(prev) && !/\s/.test(s[i + 1]) && !/[A-Za-z0-9]/.test(s[end + 1] ?? ' ') && !/\s/.test(s[end - 1])) {
         flush();
-        out.push({ t: 'em', c: inner(s.slice(i + 1, end)) });
+        out.push({ t: 'em', c: inner(i + 1, end) });
         i = end + 1;
         continue;
       }

@@ -8,6 +8,7 @@
 // 內容（讀者看得到的一切）算一個雜湊：核准與寄前檢查都綁在那個雜湊上，內容一改就退回 draft、要重新核准。
 
 import { parseAddress, type Db } from '../core.ts';
+import { checkLinks, type StoredLink } from '../track.ts';
 
 export type CampaignStatus = 'draft' | 'approved' | 'scheduled' | 'sending' | 'paused' | 'done' | 'cancelled';
 export const CAMPAIGN_STATUSES: readonly CampaignStatus[] = ['draft', 'approved', 'scheduled', 'sending', 'paused', 'done', 'cancelled'];
@@ -43,6 +44,8 @@ export interface CampaignInput {
   webUrl?: string;
   sourceRef?: string;
   audience: Audience;
+  /** compose() 的連結表（序號＋最終網址）。內容用到追蹤佔位 {{c:N}} 時必填；點擊轉址只會轉到這裡列的網址。 */
+  links?: StoredLink[];
 }
 
 export interface CampaignRow {
@@ -52,6 +55,7 @@ export interface CampaignRow {
   approved_at: string | null; approved_note: string | null; preflight: string | null; scheduled_at: string | null;
   started_at: string | null; frozen_at: string | null; last_release_at: string | null; waiting_since: string | null; last_progress_at: string | null;
   finished_at: string | null; pause_reason: string | null; counts: string | null; created_at: string; updated_at: string;
+  links?: string | null;
 }
 
 export type Fail = { ok: false; reason: string; status?: CampaignStatus; twin?: string; twinStatus?: CampaignStatus; twinBy?: 'web_url' | 'content' | 'source_ref' };
@@ -67,8 +71,11 @@ const nowIso = (now?: () => Date) => (now ?? (() => new Date()))().toISOString()
 const ctl = (s: string) => /[\u0000-\u001f\u007f]/.test(s);
 
 /** 讀者看得到的一切（含名單與寄件人）算一個雜湊。 */
-export async function contentHash(c: { list: string; subject: string; preheader?: string | null; from: string; replyTo?: string | null; html: string; text: string; headers?: Record<string, string> | null; webUrl?: string | null }): Promise<string> {
-  const raw = JSON.stringify([c.list, c.subject, c.preheader ?? '', c.from, c.replyTo ?? '', c.html, c.text, Object.entries(c.headers ?? {}).sort(), c.webUrl ?? '']);
+export async function contentHash(c: { list: string; subject: string; preheader?: string | null; from: string; replyTo?: string | null; html: string; text: string; headers?: Record<string, string> | null; webUrl?: string | null; links?: StoredLink[] | null }): Promise<string> {
+  const parts: unknown[] = [c.list, c.subject, c.preheader ?? '', c.from, c.replyTo ?? '', c.html, c.text, Object.entries(c.headers ?? {}).sort(), c.webUrl ?? ''];
+  // 連結表也算讀者看得到的內容（點了會去哪裡）。沒有連結表時雜湊跟舊版一樣，已存的期不會因升版而失效。
+  if (c.links && c.links.length) parts.push(c.links.map((l) => [l.index, l.url]));
+  const raw = JSON.stringify(parts);
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -153,6 +160,10 @@ function checkInput(input: CampaignInput, marketingDomain: string): string | nul
   if (input.webUrl !== undefined && (typeof input.webUrl !== 'string' || input.webUrl.length > 2000 || !/^https:\/\/[^\s<>"]+$/i.test(input.webUrl))) return 'bad_web_url';
   if (input.sourceRef !== undefined && (typeof input.sourceRef !== 'string' || input.sourceRef.length > LIMITS.sourceRef || ctl(input.sourceRef))) return 'bad_source_ref';
   if (!checkAudience(input.audience)) return 'bad_audience';
+  if (input.links !== undefined && !checkLinks(input.links)) return 'bad_links';
+  // 內容用到的每個 {{c:N}} 都要在連結表裡，不然寄出去的連結點了會 404。
+  const n = input.links?.length ?? 0;
+  for (const s of [input.html, input.text]) for (const m of s.matchAll(/\{\{\s*c:(\d+)\s*\}\}/g)) if (Number(m[1]) < 1 || Number(m[1]) > n) return 'links_missing';
   return null;
 }
 
@@ -169,9 +180,11 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   const bad = checkInput(input, opts.marketingDomain);
   if (bad) return { ok: false, reason: bad };
   if (!(await db.prepare('SELECT id FROM lists WHERE id = ?').bind(input.list).first())) return { ok: false, reason: 'unknown_list' };
-  const hash = await contentHash(input);
+  const hash = await contentHash({ ...input, links: input.links && input.links.length ? checkLinks(input.links) : undefined });
   const audience = JSON.stringify(checkAudience(input.audience));
   const headers = input.headers ? JSON.stringify(input.headers) : null;
+  const normalized = input.links && input.links.length ? checkLinks(input.links) : null;
+  const links = normalized && normalized.length ? JSON.stringify(normalized) : null;
   const t = nowIso(opts.now);
   const existing = await getCampaign(db, input.id);
   // 同一份內容不能用不同期號建兩次（會寄兩封）：網頁版網址（正規化後）、同名單同內文、原稿位置任一相同，且對方沒被取消，就擋。
@@ -181,10 +194,10 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   if (!existing) {
     const r = await db
       .prepare(
-        `INSERT INTO campaigns (id, list_id, subject, preheader, from_addr, reply_to, html, text, headers, web_url, source_ref, status, audience, content_hash, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
+        `INSERT INTO campaigns (id, list_id, subject, preheader, from_addr, reply_to, html, text, headers, web_url, source_ref, status, audience, content_hash, links, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
       )
-      .bind(input.id, input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.webUrl ?? null, input.sourceRef ?? null, audience, hash, t, t)
+      .bind(input.id, input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.webUrl ?? null, input.sourceRef ?? null, audience, hash, links, t, t)
       .run();
     if ((r.meta.changes ?? 0) === 1) return { ok: true, status: 'draft', changed: true };
     return { ok: false, reason: 'conflict' };
@@ -196,10 +209,10 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   const r = await db
     .prepare(
       `UPDATE campaigns SET list_id = ?, subject = ?, preheader = ?, from_addr = ?, reply_to = ?, html = ?, text = ?, headers = ?, web_url = ?, source_ref = ?, audience = ?,
-         content_hash = ?, status = 'draft', approved_hash = NULL, approved_at = NULL, approved_note = NULL, preflight = NULL, scheduled_at = NULL, updated_at = ?
+         content_hash = ?, links = ?, status = 'draft', approved_hash = NULL, approved_at = NULL, approved_note = NULL, preflight = NULL, scheduled_at = NULL, updated_at = ?
        WHERE id = ? AND status IN ('draft', 'approved', 'scheduled')`,
     )
-    .bind(input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.webUrl ?? null, input.sourceRef ?? null, audience, hash, t, input.id)
+    .bind(input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.webUrl ?? null, input.sourceRef ?? null, audience, hash, links, t, input.id)
     .run();
   if ((r.meta.changes ?? 0) !== 1) return { ok: false, reason: 'locked' };
   return { ok: true, status: 'draft', changed: true };

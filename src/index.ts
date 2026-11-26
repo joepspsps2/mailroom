@@ -7,6 +7,7 @@
 //   別的 Cloudflare 帳號的站帶自己的鑰匙 POST /v1/send；演習 POST /v1/drill；寄信統計 GET /v1/report；
 //   人工解除拒收 POST /v1/unsuppress。
 // - 退訂：GET／POST /u/{券}、POST /u/{券}/resubscribe；email() 收退訂信。
+// - 追蹤（TRACK_BASE_URL 那個 host）：GET /c/{券} 點擊轉址、GET /o/{券}.gif 開信圖（見 src/track.ts、docs/tracking.md）。
 // - 名單管理（帶管理口令）：PUT /v1/lists/{id}、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
 // - 群發（帶管理口令）：/v1/campaigns/*、/v1/throttle、/v1/warmup/*、/v1/broadcast/*（見 src/broadcast/routes.ts）；Queue mailroom-broadcast；排程每分鐘放水。
 // - Queue：Cloudflare 寄信的事後回報（cf-events.ts）。
@@ -15,7 +16,8 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { bodySizeProblem, checkHttpFrom, limitVar, localDay, lookup, parseAddress, pruneRate, purgeLedger, removeSuppression, retentionDays, send, SUPPRESSION_REASONS, takeRate, TIERS, type SuppressionReason, type CoreDeps, type MessageRow, type RouteTable, type SendRequest, type SendResult, type Tier } from './core.ts';
 import { handleCfEvent } from './cf-events.ts';
-import { listMembers, listStatus, listSubscribe, listUnsubscribe, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
+import { listMembers, listStatus, listUnsubscribe, type SubscribeInput, type SubscribeResult, type UnsubscribeInput } from './lists.ts';
+import { subscribeWithWelcome, type WelcomeQueue } from './welcome.ts';
 import { bearer, json, notFound, sameToken } from './http.ts';
 import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
 import { routeExport } from './export.ts';
@@ -26,7 +28,8 @@ import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.
 import { handleEvent, verifySignature } from './webhook.ts';
 import { handleSesWebhook } from './ses-events.ts';
 import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
-import { broadcastQueue, broadcastTick, isBroadcastBatch, testSendDeps, type BroadcastEnv } from './broadcast/worker.ts';
+import { broadcastDeps, broadcastQueue, broadcastTick, isBroadcastBatch, testSendDeps, type BroadcastEnv } from './broadcast/worker.ts';
+import { handleTrackRequest, resolveTrackSettings, trackHost, trackSecrets } from './track.ts';
 
 export interface Env extends BroadcastEnv {
   DB: D1Database;
@@ -183,8 +186,16 @@ export class Mailroom extends WorkerEntrypoint<Env> {
     return drill(this.env, site, input);
   }
   // 電子報名單（內線）：見 docs/lists.md。
-  listSubscribe(input: SubscribeInput) {
-    return listSubscribe(this.env.DB, input);
+  /** 加入名單。第一次加入（firstTime）而且群發總開關開著、這份名單的歡迎信打開時，排一封歡迎信（見 src/welcome.ts）。 */
+  async listSubscribe(input: SubscribeInput): Promise<SubscribeResult> {
+    // 總開關＝群發設得起來（寄件網域、郵差、Queue 都有）；關著就一封都不排。排信失敗不影響加入結果。
+    let switchOn = false;
+    try {
+      switchOn = broadcastDeps(this.env) !== null;
+    } catch {
+      switchOn = false;
+    }
+    return subscribeWithWelcome(this.env.DB, input, { queue: this.env.BROADCAST as unknown as WelcomeQueue | undefined, switchOn });
   }
   listUnsubscribe(input: UnsubscribeInput) {
     return listUnsubscribe(this.env.DB, input);
@@ -218,8 +229,22 @@ function publicRow(row: MessageRow | null) {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // 開信與點擊追蹤：只在 TRACK_BASE_URL 的 host 上接 /c/、/o/；鑰匙或網址沒設＝不處理。
+    const tHost = trackHost(env.TRACK_BASE_URL);
+    if (tHost && url.hostname.toLowerCase() === tHost) {
+      const site = (jsonVar<Record<string, unknown>>(env.BROADCAST_CONFIG) ?? {}).site;
+      const tracked = await handleTrackRequest(request, {
+        db: env.DB,
+        secrets: trackSecrets(env.TRACK_TOKEN_SECRET, env.TRACK_TOKEN_SECRET_PREVIOUS),
+        host: tHost,
+        settings: resolveTrackSettings(env.TRACK_CONFIG, typeof site === 'string' ? site : undefined),
+        waitUntil: ctx ? (p) => ctx.waitUntil(p) : undefined,
+      });
+      if (tracked) return tracked;
+    }
 
     if (url.pathname === '/webhooks/resend' && request.method === 'POST') {
       const size = bodySizeProblem(request.headers.get('content-length'), MAX_WEBHOOK_BYTES);
@@ -283,7 +308,7 @@ export default {
     }
 
     // 名單管理入口（帶管理口令）：見 list-routes.ts。
-    const listResponse = await routeLists(request, env.DB, env.DRILL_TOKEN);
+    const listResponse = await routeLists(request, env.DB, env.DRILL_TOKEN, env.MARKETING_DOMAIN);
     if (listResponse) return listResponse;
 
     // 分析匯出（帶管理口令）：見 export.ts。

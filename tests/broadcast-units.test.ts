@@ -17,7 +17,7 @@ test('事件：同一則重送只記一次；永久退信、檢舉進拒收；�
   await ingestEvent(w.db, ev('e2', 'bounce', 'b@example.com', 'Transient'));
   await ingestEvent(w.db, ev('e3', 'complaint', 'c@example.com'));
   const sup = (await w.db.prepare('SELECT email, reason FROM suppressions ORDER BY email').all<{ email: string; reason: string }>()).results.map((r) => `${r.email}:${r.reason}`);
-  assert.deepEqual(sup, ['a@example.com:hard_bounce', 'c@example.com:complaint']);
+  assert.deepEqual(sup, ['a@example.com:hard_bounce', 'c@example.com:unsubscribe'], 'a newsletter complaint only stops newsletters');
   const got: unknown[] = [];
   await ingestEvent(w.db, { ...ev('e4', 'bounce', 'd@example.com', 'Transient'), campaign: 'x-1' }, { feedback: async (fb) => void got.push(fb) });
   assert.deepEqual(got, [{ type: 'bounce', kind: 'transient', email: 'd@example.com', campaign: 'x-1', source: 'fake-event', detail: 'Transient' }]);

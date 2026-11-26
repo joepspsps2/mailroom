@@ -13,6 +13,7 @@ what each secret can do if it leaks, and what you should harden.
 | Resend (`POST /webhooks/resend`) | Svix signature, 5-minute window, event id de-duplicated | Update delivery status, add hard bounces and complaints to the suppression list. |
 | Cloudflare Email Sending events | Arrive on your own queue | Same as above. |
 | Amazon SES via SNS (`POST /webhooks/ses`) | SNS signature (SignatureVersion 2 by default) with a certificate fetched only from `sns.<region>.amazonaws.com`, topic ARN allowlist, 7-day window, SNS message id de-duplicated. Off (404) unless `SES_SNS_TOPIC_ARNS` is set. | Same as above, plus confirm its own SNS subscription. See [ses.md](ses.md). |
+| Anyone holding a tracking link (`/c/…`, `/o/….gif` on the `TRACK_BASE_URL` host) | HMAC-signed token (issue, contact id, link number) | Be redirected to a link stored with that issue, and add a click/open event for that contact id. Forged tokens get the same 404 as unknown ones, without a database read. See [tracking.md](tracking.md). |
 | Everyone else | — | `GET /` returns a plain-text health check. `POST /webhooks/resend` answers 401, 411 or 413. Everything else is 404. |
 
 Mailroom does **not** check that a recipient opted in, does not scan message content, and does not sanitise HTML.
@@ -55,6 +56,7 @@ Your providers (Resend, SMTP2GO, Cloudflare) receive the full message and keep t
 | `HTTP_KEY_<SITE>` | Someone sends mail as that app — phishing from your real domain — up to `HTTP_RATE_PER_MIN` / `HTTP_DAILY_LIMIT`. A `suppressed` reply also tells them an address bounced or complained, whichever of your apps it happened in. | Replace the secret (`wrangler secret put`), update the app, then check `/v1/report?days=1` for sends you don't recognise. |
 | `DRILL_TOKEN` | Up to 200 drill emails a day to arbitrary addresses, suppressions lifted, per-domain statistics read, and addresses probed for "is this on the suppression list". Recipient lists, subjects and bodies are not exposed. | Replace or delete the secret. With it deleted, the operator paths return 404. |
 | `RESEND_API_KEY`, `SMTP2GO_API_KEY` | Full sending access at the provider, outside mailroom and outside its limits. | Revoke at the provider first, then replace the secret. |
+| `TRACK_TOKEN_SECRET` | Forged click and open events for any issue and contact id (inflated statistics, `last_open_at`/`last_click_at` touched). Redirects still only go to links stored with each issue; no addresses are exposed. | Set the old value as `TRACK_TOKEN_SECRET_PREVIOUS` only if links in already-sent mail must keep working, put a new secret, and treat open/click numbers since the leak as unreliable. |
 | `RESEND_WEBHOOK_SECRET` | Forged bounce and complaint events: an attacker can suppress any address, so real mail to it stops. | Rotate the signing secret in Resend, replace the secret, review recent `suppressions` rows. |
 
 ## Hardening checklist

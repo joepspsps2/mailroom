@@ -9,6 +9,7 @@ import type { IngestOptions } from './events.ts';
 import { FakePostman, type FakeRule, type Postman } from './postman.ts';
 import { parseAllowed, type TestSendDeps } from './test-send.ts';
 import { SesPostman } from './ses.ts';
+import { trackHost, trackSecrets, trackSigner } from '../track.ts';
 
 export interface BroadcastEnv {
   DB: D1Database;
@@ -40,6 +41,14 @@ export interface BroadcastEnv {
   UNSUB_MAILTO?: string;
   /** 允許收測試信的內部信箱（JSON 陣列或逗號分隔）。沒設＝測試信功能關閉。 */
   TEST_RECIPIENTS?: string | string[];
+  /** 追蹤網址的根（https，例 https://t.example.com）。要同時有 TRACK_TOKEN_SECRET 才開追蹤端點。 */
+  TRACK_BASE_URL?: string;
+  /** 追蹤券簽章鑰匙（Secret，至少 16 字元）。內容用到追蹤佔位卻沒設＝那期因 render_error 暫停（不寄出點了會壞的信）。 */
+  TRACK_TOKEN_SECRET?: string;
+  /** 換鑰匙過渡期：舊鑰匙（逗號分隔），只驗證不簽新券。 */
+  TRACK_TOKEN_SECRET_PREVIOUS?: string;
+  /** 追蹤設定（JSON，只寫想改的欄位，見 docs/tracking.md）。 */
+  TRACK_CONFIG?: string | Record<string, unknown>;
 }
 
 export const DEFAULT_BROADCAST_QUEUE = 'mailroom-broadcast';
@@ -95,7 +104,9 @@ type Links = { unsubscribe_url: string; unsubscribe_mailto?: string | null };
  * 預設的個人化：compose 的 personalize（{{name}} {{email}} {{unsubscribe_url}} {{unsubscribe_mailto}} {{web_url}}，標頭一起填）。
  * 退訂連結由 links 提供；拿不到＝丟例外（這期會被暫停，不寄出沒有退訂連結的信）。
  */
-export function personalizeRender(links?: (c: CampaignRow, r: RecipientRow) => Links | null | Promise<Links | null>, track?: Parameters<typeof personalize>[2]) {
+export type TrackFor = (c: CampaignRow, r: RecipientRow, contents: string[]) => Promise<NonNullable<Parameters<typeof personalize>[2]>['track']>;
+
+export function personalizeRender(links?: (c: CampaignRow, r: RecipientRow) => Links | null | Promise<Links | null>, track?: Parameters<typeof personalize>[2] | TrackFor) {
   return async (c: CampaignRow, r: RecipientRow & { name: string | null }): Promise<RenderResult> => {
     const l = await links?.(c, r);
     if (!l) throw new Error('unsubscribe links not configured');
@@ -106,7 +117,8 @@ export function personalizeRender(links?: (c: CampaignRow, r: RecipientRow) => L
     } catch {
       throw new Error('bad campaign headers');
     }
-    return personalize({ html: c.html, text: c.text, headers }, { name: r.name, email: r.email, web_url: c.web_url, ...l }, track);
+    const opts = typeof track === 'function' ? { track: await track(c, r, [c.html, c.text, ...Object.values(headers)]) } : track;
+    return personalize({ html: c.html, text: c.text, headers }, { name: r.name, email: r.email, web_url: c.web_url, ...l }, opts);
   };
 }
 
@@ -117,6 +129,34 @@ export function unsubLinksFromEnv(env: BroadcastEnv) {
     if (!secrets.length || !env.UNSUB_BASE_URL) return null;
     const l = await unsubscribeLinks(secrets, { baseUrl: env.UNSUB_BASE_URL, mailtoAddress: env.UNSUB_MAILTO }, { list: c.list_id, contactId: r.contact_id, campaign: c.id });
     return { unsubscribe_url: l.url, unsubscribe_mailto: l.mailto };
+  };
+}
+
+/** 追蹤券（每位收件人、每個連結一張）。沒設鑰匙＝undefined：內容沒用到追蹤佔位就照常寄；用到了 personalize 會丟例外、這期暫停。 */
+export function trackFromEnv(env: BroadcastEnv): TrackFor | undefined {
+  const secrets = trackSecrets(env.TRACK_TOKEN_SECRET, env.TRACK_TOKEN_SECRET_PREVIOUS);
+  const host = trackHost(env.TRACK_BASE_URL);
+  // 鑰匙、追蹤網址缺一＝追蹤端點不存在：不簽（內容有追蹤佔位就會 render_error 暫停，不寄出點了 404 的信）。
+  if (!secrets.length || !host) return undefined;
+  const origin = `https://${host}`;
+  return async (c, r, contents) => {
+    // 內容裡的追蹤佔位必須掛在這個部署的追蹤網址下（compose 的 trackBase 跟 TRACK_BASE_URL 不一致＝連結會壞）。
+    for (const s of contents) {
+      for (const m of s.matchAll(/\{\{\s*(c:\d+|o)\s*\}\}/g)) {
+        const want = m[1] === 'o' ? `${origin}/o/` : `${origin}/c/`;
+        if (s.slice(Math.max(0, m.index - want.length), m.index).toLowerCase() !== want) throw new Error('tracking placeholder is not under TRACK_BASE_URL');
+      }
+    }
+    let count: number | null = 0;
+    if (c.links) {
+      try {
+        const parsed = JSON.parse(c.links);
+        count = Array.isArray(parsed) ? parsed.length : 0;
+      } catch {
+        count = 0;
+      }
+    }
+    return trackSigner(secrets[0], c.id, r.contact_id, contents, count);
   };
 }
 
@@ -138,8 +178,9 @@ export function broadcastDeps(env: BroadcastEnv, wiring: BroadcastWiring = {}): 
     domain: env.MARKETING_DOMAIN.toLowerCase(),
     queue: env.BROADCAST as unknown as BroadcastDeps['queue'],
     config,
-    render: wiring.render ?? personalizeRender(unsubLinksFromEnv(env)),
+    render: wiring.render ?? personalizeRender(unsubLinksFromEnv(env), trackFromEnv(env)),
     feedback: wiring.feedback,
+    unsub: { secrets: unsubSecrets(env.UNSUB_TOKEN_SECRET, env.UNSUB_TOKEN_SECRET_PREVIOUS), baseUrl: env.UNSUB_BASE_URL, mailto: env.UNSUB_MAILTO },
     alert: wiring.alert ?? ((a) => (a.level === 'info' ? console.log : console.warn)('broadcast', a.level, a.code, a.campaign ?? '-', a.message)),
   };
 }

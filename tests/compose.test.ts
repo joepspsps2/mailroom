@@ -60,7 +60,6 @@ test('連結改寫：每個連結換成追蹤轉址＋補 utm；佔位與 mailto
   // 長連結：原稿已有的 utm_source 不被蓋掉
   assert.equal(new URL(c.links[1].url).searchParams.get('utm_source'), 'old');
   assert.equal(new URL(c.links[1].url).searchParams.get('utm_campaign'), '2026-01-05');
-  // 網址後面緊貼的全形句號不算網址
   assert.equal(c.links[2].original, 'https://example.com/p/100');
   // 樣板的網頁版／退訂連結是佔位，不追蹤
   assert.match(c.html, /href="\{\{web_url\}\}"/);
@@ -662,4 +661,71 @@ test('有序清單的起始編號照原稿（網站顯示 2. 開頭，信裡也�
   assert.match(c.html, /<ol start="2"/);
   assert.match(c.text, /^2\. 第二$/m);
   assert.match(c.text, /^3\. 第三$/m);
+});
+
+test('裸網址後面緊貼的字（中文常見）：跟網站一樣算進連結，純文字版照「連結文字 (網址)」印，一個字都不少', () => {
+  const errs = (c: ReturnType<typeof compose>) => c.problems.filter((p) => p.severity === 'error').map((p) => p.code);
+  const c = compose(base({ source: `${FM}詳見https://example.com/a這篇文章\n\nhttps://example.com/p/1看完再說` }));
+  assert.deepEqual(errs(c), []);
+  // HTML：網站上整串都是連結文字，信裡也是
+  assert.match(c.html, /<a class="mr-link" href="https:\/\/t\.example\.com\/c\/\{\{c:1\}\}"[^>]*>https:\/\/example\.com\/a這篇文章<\/a>/);
+  assert.match(c.html, />https:\/\/example\.com\/p\/1看完再說<\/a>/);
+  // 目的地跟網站一樣，非 ASCII 字轉成 %XX
+  assert.equal(c.links[0].original, 'https://example.com/a%E9%80%99%E7%AF%87%E6%96%87%E7%AB%A0');
+  // 純文字版：緊貼的字沒有消失
+  assert.match(c.text, /詳見https:\/\/example\.com\/a這篇文章 \(https:\/\/t\.example\.com\/c\/\{\{c:1\}\}\)/);
+  assert.match(c.text, /https:\/\/example\.com\/p\/1看完再說 \(https:\/\/t\.example\.com\/c\/\{\{c:2\}\}\)/);
+});
+
+test('非 ASCII 路徑的網址（維基條目、中文商品頁）整串連過去；空白（含全形空白）才結束網址', () => {
+  const c = compose(base({ source: `${FM}參考：https://ja.wikipedia.org/wiki/写真 （查詢日）\n\nhttps://example.com/a　全形空白之後` }));
+  assert.deepEqual(c.links.map((l) => l.original), ['https://ja.wikipedia.org/wiki/%E5%86%99%E7%9C%9F', 'https://example.com/a']);
+  assert.match(c.html, />https:\/\/ja\.wikipedia\.org\/wiki\/写真<\/a> （查詢日）/);
+  assert.match(c.text, /https:\/\/example\.com\/a \(https:\/\/t\.example\.com\/c\/\{\{c:2\}\}\)　全形空白之後/);
+});
+
+test('網址最後緊貼全形標點：照網站算進連結，另記 warn 提醒加空格（不擋）', () => {
+  const c = compose(base({ source: `${FM}來源（https://example.com/a）。` }));
+  assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), []);
+  assert.ok(c.problems.some((p) => p.code === 'url_glued_text' && p.severity === 'warn'));
+  // 網站：）和。都在連結裡（全形標點不算網址尾巴的標點）
+  assert.match(c.html, />https:\/\/example\.com\/a）。<\/a>/);
+  assert.match(c.text, /來源（https:\/\/example\.com\/a）。 \(https:\/\/t\.example\.com\/c\/\{\{c:1\}\}\)/);
+});
+
+test('純文字版的連結：看得到的連結文字一定印出來；只有它就是印出來的網址時才省略', () => {
+  const tracked = compose(base({ source: `${FM}A https://example.com/x B\n\n[https://example.com/y](https://example.com/y)\n\n[信箱](mailto:hi@example.com) [a@example.com](mailto:a@example.com)` }));
+  assert.match(tracked.text, /A https:\/\/example\.com\/x \(https:\/\/t\.example\.com\/c\/\{\{c:1\}\}\) B/);
+  // [網址](網址)：網站的連結文字不再自動連結，信裡也只有一個連結
+  assert.equal(tracked.links.length, 2);
+  assert.match(tracked.text, /^https:\/\/example\.com\/y \(https:\/\/t\.example\.com\/c\/\{\{c:2\}\}\)$/m);
+  assert.match(tracked.text, /信箱 \(mailto:hi@example\.com\) a@example\.com \(mailto:a@example\.com\)/);
+  // 沒有追蹤：印出來的網址本身就含整串網址文字（後面多了 utm），不重複
+  const plain = compose(base({ source: `${FM}A https://example.com/x B`, trackBase: undefined }));
+  assert.match(plain.text, /^A https:\/\/example\.com\/x\?utm_source=newsletter&utm_medium=email&utm_campaign=2026-01-05 B$/m);
+});
+
+test('腳註引用緊貼在包著裸網址的括號、強調記號後面：網站把它吞進網址、不顯示腳註，信裡一律記 error', () => {
+  const blocked = [
+    'A (www.example.com**[^1]***) B',
+    'A **https://example.com**[^1] B',
+    '![圖](https://example.com/i.png)x(www.example.com**[^1]***) B',
+    '<https://example.com/q>_https://example.com/p**[^1]** B',
+    '[A](https://example.com)[_[B](https://example.com)*](https://example.com)[^1] C',
+    // 同一個腳註另有正常的引用，被吞掉的那個也要擋
+    'A[^1] **https://example.com**[^1] B',
+  ];
+  for (const body of blocked) {
+    const c = compose(base({ source: `${FM}${body}\n\n[^1]: 說明` }));
+    assert.ok(c.problems.some((p) => p.code === 'unsupported_syntax' && p.severity === 'error'), `應該擋下：${body}`);
+  }
+  for (const body of ['A **[B](https://example.com/a)**[^1] C', 'A [B](https://example.com)[^1] ![圖](https://example.com/i.png)[^1] <https://example.com/q>[^1]']) {
+    const c = compose(base({ source: `${FM}${body}\n\n[^1]: 說明` }));
+    assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), [], `不該擋：${body}`);
+  }
+});
+
+test('a link inside link text is blocked (the site shows the outer brackets and URL literally)', () => {
+  const r = compose({ source: '前 [[內](https://example.com/x) 外](https://example.com/y) 後\n', template: createTemplate({ brandName: 'X', postalAddress: '1 Example Street' }), issue: 't-1' });
+  assert.ok(r.problems.some((p) => p.severity === 'error' && p.code === 'unsupported_syntax' && /連結文字裡又有一個連結/.test(p.message)));
 });

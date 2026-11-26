@@ -17,6 +17,7 @@ import type { Postman, PostmanMail, ProviderEvent } from './postman.ts';
 import { reconcileCampaign } from './reconcile.ts';
 import { campaignRates, domainRates } from './stats.ts';
 import { currentStep, planBlocked } from './warmup.ts';
+import { consumeWelcome, type WelcomeMessage } from '../welcome.ts';
 
 export interface RecipientRow {
   campaign_id: string; contact_id: number; email: string; segment: string | null; wave: number | null; rank: number;
@@ -28,7 +29,7 @@ export interface RenderResult { html: string; text: string; headers?: Record<str
 /** 產生這一位收件人的信（個人化、退訂連結、追蹤簽章）。丟例外＝這期暫停（不能寄出沒有退訂連結的信）。 */
 export type Render = (campaign: CampaignRow, recipient: RecipientRow & { name: string | null }) => RenderResult | Promise<RenderResult>;
 
-export type BroadcastMessage = { kind: 'send'; campaign: string; contact: number } | { kind: 'event'; event: ProviderEvent };
+export type BroadcastMessage = { kind: 'send'; campaign: string; contact: number } | { kind: 'event'; event: ProviderEvent } | WelcomeMessage;
 export interface BroadcastQueue { sendBatch(messages: { body: BroadcastMessage; delaySeconds?: number }[]): Promise<unknown> }
 
 export interface Alert { level: 'red' | 'yellow' | 'info'; code: string; campaign?: string; message: string }
@@ -44,6 +45,8 @@ export interface BroadcastDeps {
   /** 煞車、暫停、寄完等通知交給誰（告警出口由部署端決定，引擎不自己發）。 */
   alert?: (a: Alert) => void | Promise<void>;
   feedback?: IngestOptions['feedback'];
+  /** 歡迎信的退訂連結設定（與退訂模組同一組鑰匙）。沒給＝歡迎信一律不寄（沒有退訂連結的信不出去）。 */
+  unsub?: { secrets: readonly string[]; baseUrl?: string; mailto?: string };
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -596,6 +599,15 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
     const outcome = await ingestEvent(db, msg.event, { feedback: deps.feedback, now: deps.now });
     return ack(`event:${outcome}`);
   }
+  if (msg && typeof msg === 'object' && msg.kind === 'welcome') {
+    const w = await consumeWelcome({ db, postman: deps.postman, domain: deps.domain.toLowerCase(), site: cfg.site, utcOffsetHours: cfg.utcOffsetHours, unsub: deps.unsub ?? { secrets: [] }, now: deps.now }, msg);
+    // 等候（網域停寄、額度用完…）改成重新排一則新訊息，不吃 Queue 的重試次數：不然幾次之後就掉進死信佇列，撐不到 48 小時的期限。
+    if (w.action === 'retry' && deps.queue) {
+      await deps.queue.sendBatch([{ body: msg, delaySeconds: w.delaySeconds }]);
+      return ack(`${w.outcome}:requeued`);
+    }
+    return w;
+  }
   if (!msg || typeof msg !== 'object' || msg.kind !== 'send' || typeof msg.campaign !== 'string' || !Number.isInteger(msg.contact)) return ack('bad_message');
 
   const r = await db.prepare('SELECT * FROM campaign_recipients WHERE campaign_id = ? AND contact_id = ?').bind(msg.campaign, msg.contact).first<RecipientRow>();
@@ -745,7 +757,8 @@ export async function consumeBatch(deps: BroadcastDeps, messages: readonly Queue
   const results: ConsumeResult[] = [];
   let lastSend = 0;
   for (const m of messages) {
-    const isSend = (m.body as BroadcastMessage | null)?.kind === 'send';
+    const kind = (m.body as BroadcastMessage | null)?.kind;
+    const isSend = kind === 'send' || kind === 'welcome';
     if (isSend && lastSend) {
       const wait = gap - (Date.now() - lastSend);
       if (wait > 0) await sleep(wait);
@@ -753,7 +766,7 @@ export async function consumeBatch(deps: BroadcastDeps, messages: readonly Queue
     try {
       const r = await consume(deps, m.body);
       results.push(r);
-      if (isSend && /^(sent|duplicate|uncertain|failed_|throttled|temporary)/.test(r.outcome)) lastSend = Date.now();
+      if (isSend && /^(sent|duplicate|uncertain|failed_|throttled|temporary|welcome_(sent|uncertain|failed|temporary|throttled))/.test(r.outcome)) lastSend = Date.now();
       if (r.action === 'ack') m.ack();
       else m.retry({ delaySeconds: r.delaySeconds });
     } catch (e) {

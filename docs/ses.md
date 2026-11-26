@@ -58,7 +58,7 @@ Notifications are normalised to provider events (one per recipient) and handed t
 | `Bounce`, `Transient` / `MailboxFull` | `bounce` / `Transient`, cause `mailbox` | counts toward the streak (3 issues → `hard_bounce`) |
 | `Bounce`, `Transient` / `MessageTooLarge`, `ContentRejected`, `AttachmentRejected` | cause `content` | not counted |
 | `Bounce`, `Transient` / `General`, `CustomTimeoutExceeded`; `Undetermined` | no cause | not counted |
-| `Complaint` | `complaint` | global suppression `complaint`, unsubscribed from every list |
+| `Complaint` | `complaint` | newsletters stop (suppression `unsubscribe`, detail `complaint`), unsubscribed from every list; transactional mail is not blocked (see unsubscribe.md) |
 | `Complaint` with feedback type `not-spam` | — | ignored (a correction, not a complaint) |
 | `Reject`, `Rendering Failure` | `reject` | — |
 | `DeliveryDelay` | `delay` | — |

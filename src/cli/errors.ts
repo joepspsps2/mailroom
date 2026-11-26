@@ -1,6 +1,12 @@
 // 引擎回的失敗原因 → 人看得懂的一句話＋下一步。找不到對照的，照實印原因代碼。
 
 const TABLE: Record<string, [string, string]> = {
+  links_missing: ['The content uses a tracked link that is not in the link table.', 'Run `campaign create` again with the current engine (it stores the link table), or compose without trackBase.'],
+  bad_links: ['The link table is malformed (numbers must be 1..N, http(s) URLs only).', 'Compose the issue again with `campaign create`.'],
+  marketing_domain_not_set: ['Newsletters are not configured on this deployment (no sender domain), so the welcome mail cannot be checked or stored.', 'Set MARKETING_DOMAIN first; the welcome mail can be stored switched off (--disable).'],
+  enabled_required: ['Say explicitly whether the welcome mail is on.', 'Add --enable or --disable.'],
+  unsubscribe_link_missing: ['The welcome mail has no {{unsubscribe_url}} link in the HTML or the text.', 'Use a template whose footer contains the unsubscribe link.'],
+  tracking_not_supported: ['The welcome mail contains tracking placeholders.', 'Compose it without trackBase (the `welcome` command does this).'],
   not_found: ['No such issue.', 'Check the issue id with `campaign status <id>`; create it with `campaign create` first.'],
   illegal_transition: ['The issue is not in a state where this is allowed.', 'Run `campaign status <id>` to see the current state and what comes next.'],
   illegal_state: ['The issue is not in a state where this is allowed (retry-failed works only while it is sending or paused; a finished (done) issue is closed for good: recipients that failed are recorded with their reason).', 'Run `campaign status <id>` to see the current state.'],

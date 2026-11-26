@@ -8,7 +8,7 @@ Lists are the source of truth for "who gets the newsletter". They live in the sa
 - `contacts`: one row per address, shared by every list. Addresses are trimmed and lower-cased.
 - `lists`: one row per newsletter (`weekly`, `promo`, ...). Create one with `PUT /v1/lists/{id}`.
 - `list_members`: a person's state on one list: `subscribed` or `unsubscribed`, where they came from, an optional engagement group.
-- `suppressions` (existing): global refusals. It only holds hard bounces, complaints and "no newsletters at all".
+- `suppressions` (existing): global refusals. It only holds hard bounces, complaints about transactional mail and "no newsletters at all" (which is also what a complaint about a newsletter records).
   **Unsubscribing from one list is recorded in `list_members` only**, so someone on two lists can leave one and keep the other.
 
 ## Rules
@@ -24,12 +24,13 @@ Lists are the source of truth for "who gets the newsletter". They live in the sa
 ## Internal interface (service binding)
 
 ```ts
-env.MAILROOM.listSubscribe({ list, email, source, consentVersion, name? })   // 'subscribed' | 'already' | 'blocked'
+env.MAILROOM.listSubscribe({ list, email, source, consentVersion, name? })   // { status: 'subscribed', firstTime } | { status: 'already' | 'blocked' }
 env.MAILROOM.listUnsubscribe({ list, email, source })                         // 'unsubscribed' | 'not_member'
 env.MAILROOM.listStatus({ list, email })                                      // 'subscribed' | 'unsubscribed' | 'not_found' | 'blocked'
 env.MAILROOM.listMembers({ list, status?, cursor?, limit? })                  // { members, next }, 1,000 per page
 ```
 
+`firstTime` is `true` when the address was never a member of that list before (`false` after an unsubscribe and re-subscribe). A first-time subscribe can trigger the list's welcome mail, see [welcome.md](welcome.md).
 Each `listMembers` row has `suppressed` (the address is on the global suppression list, same meaning as `listStatus` = `blocked`) and `unsubReason`.
 Bad input returns `{ status: 'rejected', reason }` (`bad_email`, `bad_list`, `unknown_list`, `bad_source`, ...) instead of throwing.
 `listStatus` reports `blocked` for a subscribed member who is on the global suppression list; an unsubscribed member always shows `unsubscribed`.
@@ -41,6 +42,7 @@ Bad input returns `{ status: 'rejected', reason }` (`bad_email`, `bad_list`, `un
 |---|---|---|
 | `PUT /v1/lists/{id}` | `{ name, fromAddr?, replyTo?, welcomeTemplate? }` | create or update |
 | `POST /v1/lists/{id}/segments` | `{ items: [{ email, segment, segmentLabel? }] }` | up to 5,000 per call; updates existing members only; idempotent |
+| `PUT` / `GET /v1/lists/{id}/welcome` | `{ subject, from, replyTo?, html, text, webUrl, enabled }` | the welcome mail ([welcome.md](welcome.md)); needs `MARKETING_DOMAIN` |
 | `POST /v1/lists/{id}/import` | `{ importedFrom, rows, dryRun?, expected? }` | up to 2,000 rows per call; see below |
 
 ## Importing

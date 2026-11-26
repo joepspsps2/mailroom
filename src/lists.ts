@@ -91,13 +91,23 @@ async function contactId(db: ListDb, email: string, name: string | null, now: st
 // ---------- 加入、退出、查狀態 ----------
 
 export interface SubscribeInput { list: string; email: string; source?: string; consentVersion?: string; name?: string }
-export type SubscribeResult = { status: 'subscribed' | 'already' | 'blocked' } | { status: 'rejected'; reason: 'bad_list' | 'unknown_list' | 'bad_email' };
+/**
+ * subscribed 會多帶 firstTime：true＝這個人以前從來不是這份名單的成員（第一次加入）；false＝退訂後再訂回。
+ * 歡迎信只寄給 firstTime 的人。
+ */
+export type SubscribeResult = { status: 'subscribed'; firstTime: boolean } | { status: 'already' | 'blocked' } | { status: 'rejected'; reason: 'bad_list' | 'unknown_list' | 'bad_email' };
 
 /**
  * 加入。回 subscribed（新加入或退訂後再訂回）、already（本來就在）、blocked（在全域拒收名單，不加）。
  * 只有「讀者本人的加入動作」能把 unsubscribed 改回 subscribed；批次匯入與同步做不到（見 importMembers）。
  */
 export async function listSubscribe(db: ListDb, input: SubscribeInput, now?: () => Date): Promise<SubscribeResult> {
+  const r = await subscribeMember(db, input, now);
+  return r.status === 'subscribed' ? { status: 'subscribed', firstTime: r.firstTime } : r;
+}
+
+/** 同 listSubscribe，另外回聯絡人編號（給引擎內部排歡迎信用，不對外）。 */
+export async function subscribeMember(db: ListDb, input: SubscribeInput, now?: () => Date): Promise<SubscribeResult | { status: 'subscribed'; firstTime: boolean; contactId: number }> {
   const email = normalizeEmail(input?.email);
   if (!email) return { status: 'rejected', reason: 'bad_email' };
   if (typeof input.list !== 'string' || !LIST_ID.test(input.list)) return { status: 'rejected', reason: 'bad_list' };
@@ -109,6 +119,7 @@ export async function listSubscribe(db: ListDb, input: SubscribeInput, now?: () 
     .bind(input.list, email)
     .first<{ status: string }>();
   if (existing?.status === 'subscribed') return { status: 'already' };
+  const firstTime = !existing;
   const id = await contactId(db, email, text(input.name), t);
   // 新加入與退訂後再訂回走同一條：退訂欄位清空、來源記新入口。
   await db
@@ -121,7 +132,7 @@ export async function listSubscribe(db: ListDb, input: SubscribeInput, now?: () 
     )
     .bind(input.list, id, t, text(input.source), text(input.consentVersion), NEW_SEGMENT, t)
     .run();
-  return { status: 'subscribed' };
+  return { status: 'subscribed', firstTime, contactId: id };
 }
 
 export interface UnsubscribeInput { list: string; email: string; source?: UnsubSource }
