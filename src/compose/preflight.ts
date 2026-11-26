@@ -10,9 +10,9 @@ export interface PreflightOptions {
   /** HTML 大小上限（位元組）；預設 90,000（Gmail 超過約 102KB 會折疊，留餘裕）。檢查時會把每個追蹤簽章與頁尾替換的長度估進去。 */
   maxHtmlBytes?: number;
   maxSubjectChars?: number;
-  /** 網頁版網址（要檢查它打不打得開）；沒給就略過這一項。 */
+  /** 網頁版網址（要檢查它打不打得開）。沒給也會記 error（web_url_unchecked）：網頁版沒查過，不准排程。 */
   webUrl?: string;
-  /** 要不要實際打網路檢查連結與圖片（預設要）。給 false＝只做離線檢查，並記一條 warn。 */
+  /** 要不要實際打網路檢查連結與圖片（預設要）。給 false＝離線檢查，結果會記一條 error（links_unchecked）：連結沒查過，不准排程。 */
   checkLinks?: boolean;
   /** 可注入的 fetch（測試用假的）。 */
   fetch?: (url: string, init?: { method?: string; signal?: AbortSignal; redirect?: 'manual' }) => Promise<{ status: number; headers?: { get(name: string): string | null } }>;
@@ -21,10 +21,30 @@ export interface PreflightOptions {
 }
 
 export interface PreflightResult {
+  /** 沒有任何 error。 */
   ok: boolean;
+  /** 連結與圖片真的打網路查過了（離線模式＝false）。 */
+  linksChecked: boolean;
+  /** 網頁版網址有給、也查過了。 */
+  webChecked: boolean;
   issues: Problem[];
   /** 每個檢查過的網址的結果（HTTP 狀態碼；0＝連不上）。 */
   linkStatuses: { url: string; status: number; kind: 'link' | 'image' | 'web' }[];
+}
+
+/** 從最終 HTML 抓出全部 <img src> 與 <a href>（含樣板頁尾，不只正文）。 */
+function htmlRefs(html: string): { imgs: { src: string; alt: string | null }[]; hrefs: string[] } {
+  const dec = (v: string) => v.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  const body = html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
+  const imgs: { src: string; alt: string | null }[] = [];
+  for (const m of body.matchAll(/<img\b[^>]*>/gi)) {
+    const src = m[0].match(/\bsrc="([^"]*)"/i);
+    const alt = m[0].match(/\balt="([^"]*)"/i);
+    imgs.push({ src: dec(src?.[1] ?? ''), alt: alt ? dec(alt[1]) : null });
+  }
+  const hrefs: string[] = [];
+  for (const m of body.matchAll(/<a\b[^>]*\bhref="([^"]*)"/gi)) hrefs.push(dec(m[1]));
+  return { imgs, hrefs };
 }
 
 /** 樣板裡「這裡還沒填」的標記格式：[[TODO: 要補什麼]]（或【待補：…】）。看到就不准寄。 */
@@ -82,7 +102,7 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
   if (!c.text.includes(needle)) add('unsubscribe_text_missing', 'error', '純文字版沒有退訂連結');
   const lu = c.headers['List-Unsubscribe'] ?? '';
   const lup = c.headers['List-Unsubscribe-Post'] ?? '';
-  if (!/^<\{\{unsubscribe_url\}\}>$/.test(lu.trim())) add('unsubscribe_header_missing', 'error', '缺 List-Unsubscribe 標頭（要指向退訂佔位）');
+  if (!/^<\{\{unsubscribe_url\}\}>(?:\s*,\s*<\{\{unsubscribe_mailto\}\}>)?$/.test(lu.trim())) add('unsubscribe_header_missing', 'error', '缺 List-Unsubscribe 標頭（要指向退訂佔位；可再加一段 mailto 佔位）');
   if (lup.trim() !== 'List-Unsubscribe=One-Click') add('unsubscribe_post_header_missing', 'error', '缺 List-Unsubscribe-Post 標頭（一鍵退訂）');
   // 退訂連結不准被改寫成追蹤連結（href 是退訂佔位但被包過的情形）
   if (c.links.some((l) => /unsubscribe/i.test(l.original) && l.url.includes('/c/'))) add('unsubscribe_tracked', 'error', '退訂連結被改寫成追蹤連結');
@@ -98,14 +118,17 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
   }
   // 樣板其他地方殘留的待補標記（頁尾文字等）
   for (const [label, body] of [['HTML', c.html], ['純文字', c.text]] as const) {
-    const visible = label === 'HTML' ? body.replace(/<style[\s\S]*?<\/style>/g, '').replace(/<[^>]+>/g, ' ') : body;
+    const visible = label === 'HTML' ? body.replace(/<style[\s\S]*?<\/style>/g, '') : body; // 含標籤屬性（圖片網址也可能是待補）
     const m = visible.match(TODO_MARKER);
     if (m) add('todo_marker', 'error', `${label}裡有待補標記「${m[0]}」，補完才能寄`);
   }
 
-  // 5. 圖片替代文字、圖片網址協定
-  for (const img of c.images) {
-    if (!img.alt.trim()) add('image_alt_missing', 'error', '有圖片沒有替代文字', img.src.slice(0, 80));
+  // 5. 圖片替代文字、圖片網址協定（看最終 HTML，頁尾的圖也算；開信圖不用替代文字）
+  const refs = htmlRefs(c.html);
+  const isPixel = (src: string) => /\/o\/\{\{o\}\}\.gif$/.test(src);
+  for (const img of refs.imgs) {
+    if (isPixel(img.src)) continue;
+    if (!(img.alt ?? '').trim()) add('image_alt_missing', 'error', '有圖片沒有替代文字', img.src.slice(0, 80));
     if (/^http:\/\//i.test(img.src)) add('image_insecure', 'warn', '圖片用 http（建議 https）', img.src.slice(0, 80));
   }
 
@@ -130,15 +153,21 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
     if (s.unknown.length) add('unknown_placeholder', 'error', `標頭 ${k} 有不認得的佔位`);
   }
 
-  // 8. 連結與圖片打得開（404／410 才算壞）
+  // 8. 連結與圖片打得開（404／410 才算壞）。檢查對象＝最終 HTML 裡所有 <a href> 與 <img src>（含頁尾），不只正文。
   const linkStatuses: PreflightResult['linkStatuses'] = [];
+  let linksChecked = false;
+  let webChecked = false;
+  if (!opts.webUrl) add('web_url_unchecked', 'error', '沒有提供網頁版網址，網頁版沒檢查過，不准排程');
   if (opts.checkLinks === false) {
-    add('links_unchecked', 'warn', '連結與圖片沒有實際檢查（離線模式）');
+    add('links_unchecked', 'error', '連結與圖片沒有實際檢查（離線模式），不准排程');
   } else {
+    linksChecked = true;
     const f = opts.fetch ?? (globalThis.fetch as unknown as NonNullable<PreflightOptions['fetch']>);
     const targets = new Map<string, 'link' | 'image' | 'web'>();
     for (const l of c.links) targets.set(l.original, 'link');
-    for (const i of c.images) if (/^https?:\/\//i.test(i.src)) targets.set(i.src, 'image');
+    const skipHref = (h: string) => h === '' || h.startsWith('{{') || /^(mailto:|tel:|#)/i.test(h) || /\/c\/\{\{c:\d+\}\}$/.test(h);
+    for (const h of refs.hrefs) if (!skipHref(h) && !targets.has(h)) targets.set(h, 'link');
+    for (const i of refs.imgs) if (i.src && !isPixel(i.src)) targets.set(i.src, 'image');
     if (opts.webUrl) targets.set(opts.webUrl, 'web');
     const list = [...targets.entries()];
     let cursor = 0;
@@ -148,9 +177,11 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
         const [url, kind] = list[cursor++];
         let host = '';
         try {
-          host = new URL(url).hostname;
+          const u = new URL(url);
+          if (!/^https?:$/.test(u.protocol)) throw new Error('scheme');
+          host = u.hostname;
         } catch {
-          add('link_invalid', 'error', '網址格式不對', url.slice(0, 80));
+          add('link_invalid', 'error', kind === 'image' ? '圖片網址格式不對（或是待補標記）' : '網址格式不對（或是待補標記）', url.slice(0, 80));
           continue;
         }
         if (privateHost(host)) {
@@ -159,6 +190,7 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
         }
         const { status, blocked } = await probe(f, url, timeout);
         linkStatuses.push({ url, status, kind });
+        if (kind === 'web' && status > 0 && !blocked) webChecked = true;
         const what = kind === 'image' ? '圖片' : kind === 'web' ? '網頁版' : '連結';
         if (blocked) {
           add(blocked === 'private' ? 'link_redirect_private' : 'link_redirect_bad', 'error', blocked === 'private' ? `${what}轉址到內網或本機位址` : `${what}轉址次數過多或轉址目標不合法`, url.slice(0, 120));
@@ -172,8 +204,9 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
     await Promise.all(Array.from({ length: Math.min(opts.concurrency ?? 6, Math.max(1, list.length)) }, worker));
     linkStatuses.sort((a, b) => a.url.localeCompare(b.url));
   }
+  if (opts.webUrl && linksChecked && !webChecked) add('web_url_unverified', 'warn', '網頁版網址連不上或逾時，無法確認');
 
-  return { ok: !issues.some((i) => i.severity === 'error'), issues, linkStatuses };
+  return { ok: !issues.some((i) => i.severity === 'error'), linksChecked, webChecked, issues, linkStatuses };
 }
 
 const MAX_HOPS = 5;
@@ -210,6 +243,7 @@ async function probe(f: NonNullable<PreflightOptions['fetch']>, url: string, tim
     return { status: 0 };
   };
   const r = await once('HEAD');
-  if (r.status === 405 || r.status === 501) return once('GET');
+  // 有些伺服器對 HEAD 亂回（405／501，甚至 404／410）：判壞連結之前再用 GET 確認一次
+  if (r.status === 405 || r.status === 501 || r.status === 404 || r.status === 410) return once('GET');
   return r;
 }

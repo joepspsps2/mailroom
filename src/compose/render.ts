@@ -13,11 +13,11 @@ function linkHtml(l: Inline & { t: 'link' }, c: Ctx): string {
   const inner = l.c.map((n) => inlineHtml(n, c)).join('');
   const href = l.out ?? l.href;
   if (href === '') return inner; // 不安全的連結已被改成純文字
-  return `<a class="mr-link" href="${escapeHtml(href)}" style="color:${c.theme.link};text-decoration:underline;word-break:break-all">${inner}</a>`;
+  return `<a class="mr-link" href="${escapeHtml(href)}" style="color:${c.theme.link};text-decoration:underline;word-break:break-word;overflow-wrap:anywhere">${inner}</a>`;
 }
 
 function imgHtml(src: string, alt: string, c: Ctx): string {
-  return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" width="${c.theme.width - 64}" style="display:block;border:0;max-width:100%;height:auto">`;
+  return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="display:block;border:0;max-width:100%;height:auto">`;
 }
 
 function inlineHtml(n: Inline, c: Ctx): string {
@@ -67,7 +67,7 @@ function blockHtml(b: Block, c: Ctx, last = false): string {
       return `<${tag} style="margin:0 0 ${mb};padding-left:24px">${items}</${tag}>`;
     }
     case 'code':
-      return `<pre class="mr-code mr-text" style="margin:0 0 ${mb};padding:12px 14px;background:${c.theme.codeBg};font-family:Menlo,Consolas,monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-all;color:${c.theme.text}">${escapeHtml(b.v)}</pre>`;
+      return `<pre class="mr-code mr-text" style="margin:0 0 ${mb};padding:12px 14px;background:${c.theme.codeBg};font-family:Menlo,Consolas,monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;color:${c.theme.text}">${escapeHtml(b.v)}</pre>`;
     case 'table': {
       const cell = (tag: 'th' | 'td', cellIn: Inline[], align: string | null) =>
         `<${tag} class="mr-bd mr-text" style="border:1px solid ${c.theme.border};padding:8px 10px;font-size:14px;line-height:1.6;text-align:${align ?? 'left'};vertical-align:top;${tag === 'th' ? 'font-weight:700;' : ''}${T(c)}">${inlines(cellIn, c)}</${tag}>`;
