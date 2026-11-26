@@ -12,7 +12,8 @@
     ".": "./src/index.ts",
     "./compose": "./src/compose/index.ts",
     "./unsub": "./src/unsub.ts",
-    "./feedback": "./src/feedback.ts"
+    "./feedback": "./src/feedback.ts",
+    "./broadcast": "./src/broadcast/index.ts"
   },
   "files": [
     "src",
