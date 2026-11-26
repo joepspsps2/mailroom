@@ -1,6 +1,6 @@
 {
   "name": "@joelincc/mailroom",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Must-deliver transactional email for Cloudflare Workers: multi-provider failover (Resend, SMTP2GO, Cloudflare Email Sending), idempotent sends, a suppression list and bounce/complaint feedback, with a D1 ledger.",
   "type": "module",
   "license": "MIT",
@@ -51,6 +51,7 @@
     "deploy": "npm test && npm run typecheck && npm run db:migrate && wrangler deploy",
     "dev": "wrangler dev",
     "clean-scan": "node .public-gate/clean-scan.mjs",
+    "build": "npm run build:cli",
     "build:cli": "tsc -p tsconfig.cli.json",
     "prepack": "npm run build:cli"
   },

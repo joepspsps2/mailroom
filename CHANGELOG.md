@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+This release also contains everything planned for 0.2.0, which was never published on its own: install 0.3.0 directly.
+
+The notes below are grouped as they were written; the 0.2.0 section further down lists its breaking changes (the `HTTP_FROM` requirement and migration `0004`) — read it before upgrading from 0.1.0. New migrations since 0.1.0: `0004` to `0007`.
 
 - **Newsletter desk commands** (`bin/mailroom.mjs`, `@joelincc/mailroom/cli`; see `docs/desk-commands.md`). One command set for a whole issue: create (compose + pre-send check), preview, test mail, approve, schedule, start, status, pause, resume/release, cancel, retry-failed, resolve, reconcile, hold release. Every command that changes state is a dry run unless `--yes` is given; every command prints a summary for people and, with `--json`, one JSON object. New read endpoints `GET /v1/campaigns/{id}/preview` and `/audience`; `POST …/preview` marks the content as previewed, `POST …/test` sends test mail to the addresses in `TEST_RECIPIENTS` only. Pause explanations (`pauseExplain`) in the status answer.
 - **Behaviour changes in broadcasting** (all of them make sending *more* careful, none loosens who receives mail or when it stops):
@@ -20,7 +24,7 @@
 
 - **Compose module** (`@joelincc/mailroom/compose`): markdown → email HTML and plain text, a configurable template factory, personalisation (`{{name}}`, `{{email}}`, `{{unsubscribe_url}}`, `{{web_url}}`), tracking-link and open-pixel placeholders, a pre-send check that blocks scheduling, and preview output. No new migration, no new dependency. Pre-send checks cover the whole final HTML (footer included), refuse offline mode and a missing web-version URL, and an optional `unsubscribe_mailto` header segment and `detectScannerClicks()` are available. See `docs/composing.md`.
 
-## 0.2.0
+## 0.2.0 (not published separately; included in 0.3.0)
 
 Breaking / behaviour changes — read before upgrading:
 
