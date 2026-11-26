@@ -8,6 +8,7 @@
 //   人工解除拒收 POST /v1/unsuppress。
 // - 退訂：GET／POST /u/{券}、POST /u/{券}/resubscribe；email() 收退訂信。
 // - 名單管理（帶管理口令）：PUT /v1/lists/{id}、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
+// - 群發（帶管理口令）：/v1/campaigns/*、/v1/throttle、/v1/warmup/*、/v1/broadcast/*（見 src/broadcast/routes.ts）；Queue mailroom-broadcast；排程每分鐘放水。
 // - Queue：Cloudflare 寄信的事後回報（cf-events.ts）。
 // - 排程：有設 cron 時，每次順手清舊計數窗；有設 DAILY_DRILL 時每天最多寄一輪演習信（過了 until 自動停）；有設 LEDGER_RETENTION_DAYS 時清過期帳本列。
 
@@ -20,8 +21,10 @@ import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
 import { handleUnsubMail, handleUnsubRequest, pageText, unsubscribeLinksForEmail, unsubSecrets, type UnsubHandlerConfig, type UnsubLinks } from './unsub.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
+import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
+import { broadcastQueue, broadcastTick, isBroadcastBatch, type BroadcastEnv } from './broadcast/worker.ts';
 
-export interface Env {
+export interface Env extends BroadcastEnv {
   DB: D1Database;
   /** 第一層（一定要到）的寄件網域，例 notify.example.com。 */
   FROM_DOMAIN: string;
@@ -273,6 +276,19 @@ export default {
     const unsubResponse = await handleUnsubRequest(env.DB, unsubConfig(env), request);
     if (unsubResponse) return unsubResponse;
 
+    // 群發管理入口（帶管理口令）。
+    if (isBroadcastPath(url.pathname)) {
+      if (!sameToken(bearer(request), env.DRILL_TOKEN ?? '') || !env.MARKETING_DOMAIN) return notFound();
+      const adminOver = await takeRate(env.DB, '_admin', ADMIN_LIMITS);
+      if (adminOver) return new Response('rate limited', { status: 429, headers: { 'retry-after': adminOver === 'day' ? '3600' : '60' } });
+      if (request.method !== 'GET') {
+        const size = bodySizeProblem(request.headers.get('content-length'), MAX_SEND_BYTES);
+        if (size) return json({ ok: false, reason: size === 'missing' ? 'length_required' : 'too_large' }, size === 'missing' ? 411 : 413);
+      }
+      const config = { ...(jsonVar<Record<string, unknown>>(env.BROADCAST_CONFIG) ?? {}), ...(env.NEWSLETTER_MAX_PER_DAY !== undefined ? { maxPerDay: env.NEWSLETTER_MAX_PER_DAY } : {}) };
+      return (await handleBroadcastRequest(request, url, { db: env.DB, domain: env.MARKETING_DOMAIN.toLowerCase(), config: config as never })) ?? notFound();
+    }
+
     const postPaths = ['/v1/drill', '/v1/unsuppress'];
     const tokenPaths = [...postPaths, '/v1/lookup', '/v1/report'];
     if (tokenPaths.includes(url.pathname) && (request.method === 'POST') === postPaths.includes(url.pathname)) {
@@ -304,6 +320,7 @@ export default {
 
   /** Cloudflare 寄信的事後回報（wrangler.jsonc 的 queues.consumers）。處理失敗的那則讓 Queue 重送。 */
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+    if (isBroadcastBatch(env, batch.queue)) return broadcastQueue(env, batch.messages);
     for (const msg of batch.messages) {
       try {
         const outcome = await handleCfEvent(env.DB, msg.body);
@@ -324,6 +341,8 @@ export default {
 
   /** 試跑期每日演習（DAILY_DRILL）。 */
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    // 群發先跑（煞車不能被後面的雜事拖累）：每分鐘放水、踩煞車、寄完對帳；沒設定群發就什麼都不做。
+    await broadcastTick(env).catch((e) => console.error('broadcast tick failed', e instanceof Error ? e.message : 'unknown'));
     const out = await dailyDrill(env);
     if (out.length) console.log('daily drill', out.join(','));
     const days = retentionDays(env.LEDGER_RETENTION_DAYS);

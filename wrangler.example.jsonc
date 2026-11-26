@@ -38,6 +38,13 @@
   // "send_email": [{ "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["app@remind.example.com"] }],
   // Delivery / bounce / complaint events from Cloudflare Email Sending (only if you use it).
   // "queues": { "consumers": [{ "queue": "mailroom-email-events", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 5 }] },
+  // Newsletter broadcasting (preview, see docs/broadcast.md). Off unless MARKETING_DOMAIN, NEWSLETTER_POSTMAN and the BROADCAST queue are all set.
+  // Add to "vars": "MARKETING_DOMAIN": "mail.example.com", "NEWSLETTER_POSTMAN": "fake", "NEWSLETTER_MAX_PER_DAY": 3000
+  // "queues": {
+  //   "producers": [{ "binding": "BROADCAST", "queue": "mailroom-broadcast" }],
+  //   "consumers": [{ "queue": "mailroom-broadcast", "max_batch_size": 10, "max_concurrency": 1, "max_retries": 10, "dead_letter_queue": "mailroom-broadcast-dlq" }]
+  // },
+  // and a cron that runs every minute: "triggers": { "crons": ["* * * * *"] }
   // Secrets (always add as Secret, never as a plain variable):
   //   RESEND_API_KEY, SMTP2GO_API_KEY, RESEND_WEBHOOK_SECRET, DRILL_TOKEN, HTTP_KEY_*, RESEND_API_KEY_REMIND (optional)
   // Needed for LEDGER_RETENTION_DAYS and DAILY_DRILL: the Worker's scheduled handler runs on this trigger.

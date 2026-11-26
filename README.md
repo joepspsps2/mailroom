@@ -22,6 +22,13 @@ It is **not** a newsletter or marketing-email system: there are no lists, campai
 The `@joelincc/mailroom/compose` entry point turns a markdown source into an email (HTML + plain text), personalises it, and
 runs a pre-send check that refuses to schedule a broken issue. It does not send anything. See [docs/composing.md](docs/composing.md).
 
+## Broadcasting (preview)
+
+The `@joelincc/mailroom/broadcast` entry point sends one newsletter issue to a frozen list: approval and pre-send check
+before scheduling, waves, pacing under the provider's limits and your own daily cap, a warm-up ladder, automatic brakes
+on bounces and complaints, and a reconciliation that must add up before an issue counts as done. The only built-in
+newsletter postman is a fake one for development. See [docs/broadcast.md](docs/broadcast.md).
+
 ## How it works
 
 ```
@@ -130,6 +137,7 @@ If your app can't reach the mailroom at all, queue the message locally and retry
 | `POST /v1/drill`, `GET /v1/lookup`, `GET /v1/report`, `POST /v1/unsuppress` | Operator tools (see below) | `DRILL_TOKEN`; **if it isn't set these paths return 404**; 20 requests/min and 200/day in total |
 | `GET`/`POST /u/{token}`, `POST /u/{token}/resubscribe` | Unsubscribe page and one-click unsubscribe ([docs/unsubscribe.md](docs/unsubscribe.md)) | the unsubscribe token itself |
 | `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments` | Newsletter list management ([docs/lists.md](docs/lists.md)) | `DRILL_TOKEN`, same quota; bodies capped at 1.5 MB |
+| `/v1/campaigns/*`, `/v1/throttle`, `/v1/warmup/*`, `/v1/broadcast/release-hold` | Newsletter broadcasting ([docs/broadcast.md](docs/broadcast.md)); 404 unless `MARKETING_DOMAIN` is set | `DRILL_TOKEN`, same quota; bodies capped at 3 MB |
 
 Apart from `GET /` (a plain-text health check), anything else returns 404. Unknown keys get a 404, not a 401, so the endpoint doesn't confirm that it exists. The operator endpoints only return status fields — never recipients, senders or subjects — so a leaked `DRILL_TOKEN` can't be used to read your mail log. It **can** still be used to send drill emails from your domain to any address (capped by the limit above) and to lift suppressions, so treat it like a password: set it only when you need it, and rotate it after use (`wrangler secret put DRILL_TOKEN`, or `wrangler secret delete DRILL_TOKEN` to switch the endpoints off). Request bodies must carry a `Content-Length` header (411 otherwise) and are capped at 3 MB (`/v1/send`) and 256 KB (webhook). Someone holding a leaked token can also use up the operator quota for the day, locking you out until you rotate the token.
 
