@@ -4,6 +4,7 @@
 import type { Db } from '../core.ts';
 import { applyFeedback, type FeedbackEvent } from '../feedback.ts';
 import { listUnsubscribe } from '../lists.ts';
+import { scrubEmails } from '../export.ts';
 import { EVENT_TYPES, type ProviderEvent } from './postman.ts';
 
 /** 交給「退信／檢舉怎麼進拒收」那一層的事件（＝退訂模組 feedback.ts 的 FeedbackEvent）。 */
@@ -98,7 +99,7 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
       `INSERT INTO events (provider, provider_event_id, message_id, provider_message_id, campaign_id, contact_id, type, subtype, at, detail)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (provider_event_id) DO NOTHING`,
     )
-    .bind(ev.provider, ev.providerEventId, msg?.id ?? null, ev.providerMessageId ? String(ev.providerMessageId).slice(0, 200) : null, campaign, contact, ev.type, subtype, at, ev.detail ? JSON.stringify(ev.detail).slice(0, 2000) : null)
+    .bind(ev.provider, ev.providerEventId, msg?.id ?? null, ev.providerMessageId ? String(ev.providerMessageId).slice(0, 200) : null, campaign, contact, ev.type, subtype, at, ev.detail ? JSON.stringify(scrubEmails(ev.detail)).slice(0, 2000) : null)
     .run();
   return 'recorded';
 }
