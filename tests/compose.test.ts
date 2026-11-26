@@ -582,3 +582,66 @@ test('看起來像標籤的字：訊息告訴作者怎麼改寫，不是「信�
   const real = compose(base({ source: `${FM}字<span>x</span>` })).problems.find((x) => x.code === 'unsupported_html');
   assert.match(real?.message ?? '', /排不出來的行內 HTML 標籤/);
 });
+
+// ───────── 註解 × 各種程式碼寫法：兩兩組合的對抗測試 ─────────
+// 原則：每一種組合，不是正確處理（真註解不外露、程式碼裡的註解與正文都在），就是記 error；
+// 絕不「註解外露卻零 error」，也絕不「內容消失卻零 error」。
+const CODE_CONTEXTS: { name: string; incode: boolean; make: (c: string) => string }[] = [
+  { name: '頂格程式碼框', incode: true, make: (c) => `\`\`\`\n${c}\n\`\`\`` },
+  { name: '波浪線程式碼框', incode: true, make: (c) => `~~~\n${c}\n~~~` },
+  { name: '清單內程式碼框', incode: true, make: (c) => `- 項目\n\n    \`\`\`\n    ${c}\n    \`\`\`` },
+  { name: '引言內程式碼框', incode: true, make: (c) => `> \`\`\`\n> ${c}\n> \`\`\`` },
+  { name: '單反引號', incode: true, make: (c) => `文字 \`${c}\` 文字` },
+  { name: '雙反引號', incode: true, make: (c) => `文字 \`\`${c} \` x\`\` 文字` },
+  { name: '跨行行內程式碼', incode: true, make: (c) => `文字 \`前\n${c} 後\` 文字` },
+  { name: '反斜線跳脫的反引號', incode: false, make: (c) => `文字 \\\`${c}\\\` 文字` },
+  { name: '不成對的反引號', incode: false, make: (c) => `文字 \` ${c} 文字` },
+  { name: '沒收尾的程式碼框', incode: true, make: (c) => `\`\`\`\n${c}` },
+];
+const TAILS: { name: string; make: (s: string) => string }[] = [
+  { name: '後面行內註解', make: (s) => `${s}\n\nKEEP後文 <!-- SECRET甲 --> 之後` },
+  { name: '後面跨行草稿註解', make: (s) => `${s}\n\nKEEP後文\n\n<!--\nSECRET乙\n\n還有一段 SECRET丙\n-->\n\n尾段` },
+  { name: '註解在前面', make: (s) => `<!-- SECRET丁 -->\n\nKEEP前文\n\n${s}\n\n尾段` },
+  { name: '後面接另一個程式碼框與註解', make: (s) => `${s}\n\nKEEP後文\n\n\`\`\`\n<!-- INCODE2 -->\n\`\`\`\n\n<!-- SECRET戊 -->` },
+];
+
+test('對抗測試：註解 × 程式碼寫法 兩兩組合，不是正確處理就是記 error', () => {
+  let ran = 0;
+  for (const ctx of CODE_CONTEXTS) {
+    for (const tail of TAILS) {
+      const src = `${FM}${tail.make(ctx.make('<!--INCODE-->'))}`;
+      const c = compose(base({ source: src }));
+      const errors = c.problems.filter((p) => p.severity === 'error');
+      const out = `${c.html}\n${c.text}`;
+      const label = `${ctx.name}／${tail.name}`;
+      ran++;
+      if (errors.length) continue; // 記了 error＝寧可擋下，合格
+      assert.ok(!/SECRET/.test(out), `${label}：真註解外露了卻沒有 error`);
+      if (tail.name !== '註解在前面') assert.ok(out.includes('KEEP後文'), `${label}：正文消失了卻沒有 error`);
+      else assert.ok(out.includes('KEEP前文'), `${label}：正文消失了卻沒有 error`);
+      assert.ok(out.includes('尾段') || tail.name.startsWith('後面行內') || tail.name.startsWith('後面接'), `${label}：尾段消失了卻沒有 error`);
+      if (ctx.incode) assert.ok(/INCODE(?!2)/.test(out), `${label}：程式碼裡的註解內容消失了卻沒有 error`);
+      else assert.ok(!/INCODE(?!2)/.test(out), `${label}：不是程式碼的註解外露了卻沒有 error`);
+      if (tail.name.startsWith('後面接')) assert.ok(out.includes('INCODE2'), `${label}：後面程式碼框的內容消失了卻沒有 error`);
+    }
+  }
+  assert.equal(ran, CODE_CONTEXTS.length * TAILS.length);
+});
+
+test('引言／清單裡的程式碼框後面接註解：註解被剝掉，不連累後文；保險能接住漏網的註解', () => {
+  const q = compose(base({ source: `${FM}> \`\`\`\n> code\n> \`\`\`\n\n正文 <!-- 內部筆記 --> 之後\n\n<!--\n草稿註解\n-->\n\n尾段` }));
+  assert.deepEqual(q.problems.filter((p) => p.severity === 'error'), []);
+  assert.ok(!/內部筆記|草稿註解/.test(q.html + q.text));
+  assert.match(q.text, /尾段/);
+  const l = compose(base({ source: `${FM}- 項\n\n    \`\`\`\n    code\n    \`\`\`\n\n正文 <!-- 內部筆記 --> 之後` }));
+  assert.deepEqual(l.problems.filter((p) => p.severity === 'error'), []);
+  assert.ok(!/內部筆記/.test(l.html + l.text));
+});
+
+test('保險：程式碼以外若還留著 <!--（例如作者用反斜線跳脫了它），一定記 comment_leaked error 並擋下排程', async () => {
+  assert.equal(parseMarkdown(`${FM}普通文字`).problems.length, 0);
+  // 構造一個剝除器看不到、解析器卻當文字的寫法：反斜線後面接 < 的跳脫會在解析時還原成文字 "<!--"
+  const sneaky = compose(base({ source: `${FM}前 \\<!-- 夾帶 --> 後` }));
+  assert.ok(sneaky.problems.some((p) => p.code === 'comment_leaked' && p.severity === 'error'), '漏網的註解要被保險接住');
+  assert.ok(!(await pf(sneaky)).ok);
+});
