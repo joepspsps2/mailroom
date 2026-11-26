@@ -222,6 +222,7 @@ export function compose(opts: ComposeOptions): ComposeResult {
   const parts = { subject, preheader, bodyHtml, bodyText, pixelUrl };
   const html = t.renderHtml(parts);
   const text = t.renderText(parts);
+  checkOutputForComments(parsed.blocks, parts, t, problems);
 
   return {
     subject,
@@ -254,4 +255,43 @@ function flatBlocks(blocks: Block[]): Block[] {
     else if (b.t === 'list') for (const it of b.items) out.push(...flatBlocks(it));
   }
   return out;
+}
+
+/** 數 <!--（含跳脫成 &lt;!-- 的）出現幾次。 */
+const commentMarks = (s: string) => s.split('<!--').length - 1 + (s.split('&lt;!--').length - 1);
+
+/**
+ * 最後一道保險：看「最終」HTML 與純文字版（不是解析樹）。把程式碼的內容遮掉重排一次，跟「只有樣板、沒有正文」的版本比：
+ * 程式碼以外多出任何一個 <!--，就代表有註解字樣會寄到讀者眼前（解析或排版哪裡出了錯），記 error 擋下。
+ * 樣板自己的 Outlook 條件註解（<!--[if mso]>）在兩邊一樣多，所以不會誤報。
+ */
+function checkOutputForComments(blocks: Block[], parts: { subject: string; preheader: string; bodyHtml: string; bodyText: string; pixelUrl?: string }, t: EmailTemplate, problems: Problem[]): void {
+  if (problems.some((p) => p.code === 'comment_leaked' || p.code === 'unclosed_comment')) return; // 已經擋下，不重複報
+  const masked = structuredClone(blocks);
+  const mask = (bs: Block[]): void => {
+    const inl = (ns: Inline[]) => {
+      for (const n of ns) {
+        if (n.t === 'code') n.v = '';
+        else if (n.t === 'strong' || n.t === 'em' || n.t === 'link') inl(n.c);
+      }
+    };
+    for (const b of bs) {
+      if (b.t === 'code') b.v = '';
+      else if (b.t === 'p' || b.t === 'h') inl(b.c);
+      else if (b.t === 'quote') mask(b.c);
+      else if (b.t === 'list') for (const it of b.items) mask(it);
+      else if (b.t === 'table') {
+        for (const c of b.head) inl(c);
+        for (const r of b.rows) for (const c of r) inl(c);
+      } else if (b.t === 'image' && b.link) inl(b.link.c);
+    }
+  };
+  mask(masked);
+  const withBody = { ...parts, bodyHtml: renderBodyHtml(masked, t.theme, t.labels), bodyText: renderBodyText(masked, t.labels) };
+  const empty = { ...parts, bodyHtml: '', bodyText: '' };
+  const extraHtml = commentMarks(t.renderHtml(withBody)) - commentMarks(t.renderHtml(empty));
+  const extraText = commentMarks(t.renderText(withBody)) - commentMarks(t.renderText(empty));
+  if (extraHtml > 0 || extraText > 0) {
+    problems.push({ code: 'comment_leaked', severity: 'error', message: `信件${extraHtml > 0 ? ' HTML' : ''}${extraText > 0 ? ' 純文字版' : ''}在程式碼以外含有 <!-- 字樣，會原樣寄到讀者眼前；請檢查原稿裡的註解寫法` });
+  }
 }

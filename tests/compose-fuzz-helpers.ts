@@ -1,0 +1,202 @@
+// 隨機探測：註解 × 程式碼寫法 × 區塊，拿 CommonMark 參照渲染器（satteri，只在 devDependencies）當「網站上讀者看到什麼」的標準答案，
+// 檢查產信的三條不變式（任何輸入都要成立；記了 error＝寧可擋下，算合格）：
+//   I1 網站上藏起來的（註解裡的字），不得出現在信件 HTML 或純文字版
+//   I2 網站上看得到的（正文、程式碼），不得從信件 HTML 或純文字版消失
+//   I3 程式碼裡的 <!--、--> 字樣原樣保留
+// 測試本體在 compose-fuzz.test.ts；這裡是產生器與比對。
+import { markdownToHtml } from 'satteri';
+import { compose, createTemplate } from '../src/compose/index.ts';
+
+const template = createTemplate({
+  brandName: 'Example Weekly',
+  postalAddress: '1 Example Street',
+  labels: { viewInBrowser: 'v', unsubscribe: 'u', sentTo: 's {email}', embedCard: 'e', image: (a) => `[img:${a}]` },
+});
+const FM = '---\ntitle: T\ndescription: D\n---\n';
+
+// ───────── 參照：照瀏覽器的規則讀 HTML，標出每個記號是在註解裡、程式碼裡，還是正文 ─────────
+type Where = 'comment' | 'code' | 'text';
+const TOKEN = /(?:BODY|CMT|CODE)\d+X/g;
+function classify(html: string): Map<string, Where[]> {
+  const out = new Map<string, Where[]>();
+  let inComment = false;
+  let code = 0;
+  for (let i = 0; i < html.length; ) {
+    if (inComment) {
+      const a = html.indexOf('-->', i);
+      const b = html.indexOf('--!>', i);
+      const e = a < 0 ? b : b < 0 ? a : Math.min(a, b);
+      const seg = e < 0 ? html.slice(i) : html.slice(i, e);
+      for (const m of seg.matchAll(TOKEN)) (out.get(m[0]) ?? out.set(m[0], []).get(m[0])!).push('comment');
+      if (e < 0) break;
+      inComment = false;
+      i = e + (e === b ? 4 : 3);
+      continue;
+    }
+    if (html.startsWith('<!--', i)) {
+      // <!--> 與 <!---> 是空註解
+      if (html.startsWith('<!-->', i)) i += 5;
+      else if (html.startsWith('<!--->', i)) i += 6;
+      else {
+        inComment = true;
+        i += 4;
+      }
+      continue;
+    }
+    if (html[i] === '<') {
+      const end = html.indexOf('>', i);
+      const tag = html.slice(i, end + 1);
+      if (/^<code\b/i.test(tag)) code++;
+      else if (/^<\/code>/i.test(tag)) code = Math.max(0, code - 1);
+      i = end + 1;
+      continue;
+    }
+    const next = html.indexOf('<', i);
+    const seg = next < 0 ? html.slice(i) : html.slice(i, next);
+    for (const m of seg.matchAll(TOKEN)) (out.get(m[0]) ?? out.set(m[0], []).get(m[0])!).push(code ? 'code' : 'text');
+    i = next < 0 ? html.length : next;
+  }
+  return out;
+}
+
+/** 參照 HTML 裡、在 <code> 之內的 <!--…、…--> 字樣（跳脫過的），信裡的純文字版要原樣找得到。 */
+function codeMarks(html: string): string[] {
+  const want: string[] = [];
+  for (const m of html.matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)) {
+    for (const x of m[1].matchAll(/&lt;!-- ((?:BODY|CMT|CODE)\d+X)/g)) want.push(`<!-- ${x[1]}`);
+    for (const x of m[1].matchAll(/((?:BODY|CMT|CODE)\d+X) --&gt;/g)) want.push(`${x[1]} -->`);
+  }
+  return want;
+}
+
+// ───────── 產生器 ─────────
+function makeGen(seed: number) {
+  let s = seed >>> 0;
+  const r = () => {
+    s = (Math.imul(s, 1103515245) + 12345) >>> 0;
+    return (s >>> 8) / 0x1000000;
+  };
+  const pick = <T,>(a: T[]): T => a[Math.floor(r() * a.length)];
+  let k = 0;
+  const B = () => `BODY${++k}X`;
+  const C = () => `CMT${++k}X`;
+  const D = () => `CODE${++k}X`;
+  const comment = (): string =>
+    pick([
+      () => `<!-- ${C()} -->`,
+      () => `<!--${C()}-->`,
+      () => `<!-- ${C()} \` x -->`,
+      () => `<!-- ${C()} \`\`\` -->`,
+      () => `<!--\n${C()}\n-->`,
+      () => `<!-- ${C()} --><!-- ${C()} -->`,
+      () => `<!-- ${C()}`,
+      () => `<!--\n${C()}\n\n${C()}\n-->`,
+      () => `<!-- ${C()} -->${B()}`,
+      () => `<!-- ${C()} -- ${C()} -->`,
+      () => `<!---->${B()}`,
+      () => `<!-- \`${C()} -->\` ${B()}`,
+    ])();
+  const inline = (): string =>
+    pick([
+      B, B, B, comment, comment,
+      () => `\`${D()}\``,
+      () => `\`<!-- ${D()} -->\``,
+      () => `\`\`${D()} \` <!-- ${D()} -->\`\``,
+      () => `\`${D()}\n<!-- ${D()} --> ${D()}\``,
+      () => `\`${D()}\nmid <!-- ${D()} --> ${D()}\``,
+      () => `\`<!--\` ${B()} \`-->\``,
+      () => `\\\`${B()}\\\``,
+      () => `\\\\\`${D()}\``,
+      () => `\\\\\\\`${B()}\``,
+      () => `\` ${B()}`,
+      () => '`',
+      () => '``',
+      () => `**${B()}**`,
+      () => `*${B()} \`${D()}\`*`,
+      () => `[${B()}](https://example.com/a)`,
+      () => `[${B()} \`${D()}\`](https://example.com/b)`,
+      () => `\\<!-- ${B()} -->`,
+      () => `${B()} <!-- ${C()} \`${C()}\` -->`,
+    ])();
+  const inl = (n = 1 + Math.floor(r() * 4), seps = [' ', ' ', '\n']) => Array.from({ length: n }, inline).join(pick(seps));
+  const cell = () => Array.from({ length: 1 + Math.floor(r() * 2) }, () => inline().replace(/\n/g, ' ')).join(' ').replace(/\|/g, '');
+  const fenceBody = () =>
+    Array.from({ length: 1 + Math.floor(r() * 3) }, () => pick([() => D(), () => `<!-- ${D()} -->`, () => `\` ${D()}`, () => `<!--\n${D()}`, () => `${D()} -->`, () => '```', () => ''])()).join('\n');
+  const fence = (ind = '') => {
+    const m = pick(['```', '~~~', '````', '~~~~']);
+    const info = pick(['', '', 'js']);
+    const open = r() < 0.12;
+    const body = fenceBody()
+      .split('\n')
+      .filter((l) => !(m.startsWith('`') && /^`{3,}$/.test(l) && l.length >= m.length))
+      .map((l) => (l ? ind + l : l))
+      .join('\n');
+    return `${ind}${m}${info}\n${body}${open ? '' : `\n${ind}${m}`}`;
+  };
+  const pre = (t: string, p: string) => t.split('\n').map((l) => p + l).join('\n');
+  const block = (): string =>
+    pick([
+      () => inl(),
+      () => inl(),
+      () => `${pick(['#', '##', '###'])} ${inl(2, [' '])}`,
+      () => `- ${inl(2)}\n- ${inl(2)}`,
+      () => `- ${inl(1)}\n  - ${inl(2)}`,
+      () => `1. ${inl(2)}\n2. ${inl(1)}`,
+      () => pre(inl(2), '> '),
+      () => `> ${inl(1)}\n${inl(1)}`,
+      () => `| ${cell()} | ${cell()} |\n|---|---|\n| ${cell()} | ${cell()} |`,
+      () => fence(),
+      () => fence(),
+      () => `- item ${B()}\n\n${fence('  ')}`,
+      () => `- ${B()}\n  - ${B()}\n\n${fence('    ')}`,
+      () => pre(fence(), '> '),
+      () => `- ${fence().replace(/\n/g, '\n  ')}`,
+      () => `    ${D()}\n    <!-- ${D()} -->`,
+      comment,
+      () => `${inl(1)}\n${pick(['===', '---'])}`,
+    ])();
+  return () => {
+    k = 0;
+    return Array.from({ length: 1 + Math.floor(r() * 4) }, block).join(pick(['\n\n', '\n\n', '\n']));
+  };
+}
+
+export interface FuzzStats {
+  n: number;
+  errored: number;
+  i1: { src: string; info: string }[];
+  i2: { src: string; info: string }[];
+  i3: { src: string; info: string }[];
+}
+
+/** 一份原稿：跟參照比對三條不變式。errored＝記了 error（寧可擋下，算合格，violations 一定是空的）。 */
+export function checkOne(body: string): { errored: boolean; errors: string[]; violations: { kind: 'I1' | 'I2' | 'I3'; info: string }[] } {
+  const ref = markdownToHtml(body).html;
+  const where = classify(ref);
+  const c = compose({ source: FM + body, template, issue: 'x1', trackBase: 'https://t.example.com', siteBase: 'https://example.com' });
+  const errors = c.problems.filter((p) => p.severity === 'error').map((p) => p.code);
+  if (errors.length) return { errored: true, errors, violations: [] };
+  const violations: { kind: 'I1' | 'I2' | 'I3'; info: string }[] = [];
+  for (const tok of new Set(body.match(TOKEN) ?? [])) {
+    const w = where.get(tok) ?? [];
+    const shown = w.some((x) => x !== 'comment');
+    const inH = c.html.includes(tok);
+    const inT = c.text.includes(tok);
+    if (!shown && (inH || inT)) violations.push({ kind: 'I1', info: `${tok} 網站上藏起來，信裡出現了` });
+    if (shown && !(inH && inT)) violations.push({ kind: 'I2', info: `${tok} 網站上看得到，信裡${inH ? '純文字版' : inT ? 'HTML' : '兩版都'}不見了` });
+  }
+  for (const m of codeMarks(ref)) if (!c.text.includes(m)) violations.push({ kind: 'I3', info: `程式碼裡的「${m}」沒有原樣保留` });
+  return { errored: false, errors, violations };
+}
+
+export function runFuzz(n: number, seed: number): FuzzStats {
+  const gen = makeGen(seed);
+  const st: FuzzStats = { n, errored: 0, i1: [], i2: [], i3: [] };
+  for (let t = 0; t < n; t++) {
+    const body = gen();
+    const r = checkOne(body);
+    if (r.errored) st.errored++;
+    for (const v of r.violations) (v.kind === 'I1' ? st.i1 : v.kind === 'I2' ? st.i2 : st.i3).push({ src: body, info: v.info });
+  }
+  return st;
+}

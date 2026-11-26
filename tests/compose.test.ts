@@ -593,7 +593,9 @@ const CODE_CONTEXTS: { name: string; incode: boolean; make: (c: string) => strin
   { name: '引言內程式碼框', incode: true, make: (c) => `> \`\`\`\n> ${c}\n> \`\`\`` },
   { name: '單反引號', incode: true, make: (c) => `文字 \`${c}\` 文字` },
   { name: '雙反引號', incode: true, make: (c) => `文字 \`\`${c} \` x\`\` 文字` },
-  { name: '跨行行內程式碼', incode: true, make: (c) => `文字 \`前\n${c} 後\` 文字` },
+  // 已裁定：跨行行內程式碼遇到「以 <!-- 開頭的行」，照 CommonMark 那一行是註解區塊（會打斷段落），不是程式碼
+  { name: '跨行行內程式碼（註解在行首）', incode: false, make: (c) => `文字 \`前\n${c} 後\` 文字` },
+  { name: '跨行行內程式碼（註解不在行首）', incode: true, make: (c) => `文字 \`前\n中 ${c} 後\` 文字` },
   { name: '反斜線跳脫的反引號', incode: false, make: (c) => `文字 \\\`${c}\\\` 文字` },
   { name: '不成對的反引號', incode: false, make: (c) => `文字 \` ${c} 文字` },
   { name: '沒收尾的程式碼框', incode: true, make: (c) => `\`\`\`\n${c}` },
@@ -644,4 +646,20 @@ test('保險：程式碼以外若還留著 <!--（例如作者用反斜線跳脫
   const sneaky = compose(base({ source: `${FM}前 \\<!-- 夾帶 --> 後` }));
   assert.ok(sneaky.problems.some((p) => p.code === 'comment_leaked' && p.severity === 'error'), '漏網的註解要被保險接住');
   assert.ok(!(await pf(sneaky)).ok);
+});
+
+test('保險二：最終 HTML／純文字在程式碼以外出現 <!--（例如原稿寫 &lt;!--）也擋下；樣板自己的 Outlook 條件註解不算', async () => {
+  const ent = compose(base({ source: `${FM}前 &lt;!-- 夾帶 --&gt; 後` }));
+  assert.ok(ent.problems.some((p) => p.code === 'comment_leaked' && p.severity === 'error'));
+  assert.ok(!(await pf(ent)).ok);
+  const fine = compose(base({ source: `${FM}一般段落\n\n\`<!-- 程式碼裡的 -->\`` }));
+  assert.match(fine.html, /<!--\[if mso\]>/);
+  assert.deepEqual(fine.problems.filter((p) => p.severity === 'error'), []);
+});
+
+test('有序清單的起始編號照原稿（網站顯示 2. 開頭，信裡也是）', () => {
+  const c = compose(base({ source: `${FM}2. 第二\n3. 第三` }));
+  assert.match(c.html, /<ol start="2"/);
+  assert.match(c.text, /^2\. 第二$/m);
+  assert.match(c.text, /^3\. 第三$/m);
 });
