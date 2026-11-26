@@ -107,10 +107,12 @@ interface Ctx {
   refs: Set<string>;
   inDef: boolean;
   inLink: number;
+  /** 正在轉的強調緊接在裸網址後面（網站會把整串吞進網址，裡面的腳註引用不算）。 */
+  urlCtx: number;
   /** 最近一段合格腳註定義結束在哪一行（只在最外層用）：之後空行＋縮排的行＝網站上可能屬於腳註的續段，判不準。 */
   lastDefEnd: number;
 }
-const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0, lastDefEnd: -1 });
+const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0, urlCtx: 0, lastDefEnd: -1 });
 const scratch = newCtx;
 /** 行首空白裡有 tab。 */
 const tabLead = (l: string) => /^[ \t]*\t/.test(l.startsWith(LAZY) ? l.slice(1) : l);
@@ -265,6 +267,8 @@ function autolink(text: string): Inline[] {
     const url = trimUrlTail(raw);
     const at = m.index ?? 0;
     if (url.length < 9) continue;
+    // 網址前面緊接英文字母或數字（例：abchttps://…）：網站不做成連結，照字面留著
+    if (at > 0 && /[A-Za-z0-9]/.test(text[at - 1])) continue;
     if (at > last) out.push({ t: 'text', v: text.slice(last, at) });
     out.push({ t: 'link', href: url, c: [{ t: 'text', v: url }], bare: true });
     last = at + url.length;
@@ -276,6 +280,12 @@ function autolink(text: string): Inline[] {
 /** 網站會自動連結的網址（http、https、www.、email）出現在一串不含空白的字裡。 */
 const URL_TAIL = /(?:https?:\/\/|www\.|[\w.+-]+@[\w-]+\.)/i;
 /** 腳註標籤比對：不分大小寫，照 Unicode 的大小寫折疊（ß＝ss、ς＝σ）。 */
+const EMAIL_TAIL = /[\w.+-]+@[\w-]+\./;
+/** 原稿這一串（不含空白）裡有裸網址：網站的自動連結會從網址一路吞到下一個空白（中間的 [..](..)、**、反引號都吞），只有 ](網址) 或 <網址> 裡的不算。 */
+function bareUrlBefore(srcTail: string): boolean {
+  const u = srcTail.search(/https?:\/\/|www\./i);
+  return u >= 0 && !/(?:\]\(|<)$/.test(srcTail.slice(0, u));
+}
 const fnLabel = (l: string) => l.toLowerCase().toUpperCase().toLowerCase();
 
 function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
@@ -288,6 +298,14 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
     }
   };
   let i = 0;
+  // 強調的內層：前面緊接裸網址時，網站把整串吞進網址，內層的腳註引用不算
+  const inner = (sub: string): Inline[] => {
+    const u = bareUrlBefore(s.slice(0, i).match(/\S*$/)![0]) || URL_TAIL.test(buf.match(/\S*$/)![0]);
+    if (u) ctx.urlCtx++;
+    const r = parseInline(sub, ctx, depth + 1);
+    if (u) ctx.urlCtx--;
+    return r;
+  };
   while (i < s.length) {
     const ch = s[i];
     if (ch === '\\' && i + 1 < s.length && ESCAPABLE.test(s[i + 1])) {
@@ -305,7 +323,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
     }
     if (ch === '`') {
       // 網址後面緊接反引號：網站會把反引號收進自動連結，程式碼的切法就跟信裡不同，判不準
-      if (URL_TAIL.test(buf.match(/\S*$/)![0])) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址後面緊接反引號，網站會把反引號當成網址的一部分；請在網址和反引號之間加空格', where: clip(buf.match(/\S*$/)![0] + s.slice(i, i + 20)) });
+      if (URL_TAIL.test(buf.match(/\S*$/)![0]) || bareUrlBefore(s.slice(0, i).match(/\S*$/)![0])) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址後面緊接反引號，網站會把反引號當成網址的一部分；請在網址和反引號之間加空格', where: clip(buf.match(/\S*$/)![0] + s.slice(i, i + 20)) });
       const span = codeSpanAt(s, i);
       if (span) {
         flush();
@@ -334,6 +352,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         i += 4;
         continue;
       }
+      flush(); // 註解把前後的字隔開：網址到這裡就結束，不能跟註解後面的字黏成一個網址
       hideComment(s.slice(i, e), ctx);
       i = e;
       continue;
@@ -365,8 +384,8 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       // 接在網址後面（https://…[^1]、(www.…)[^1]）的不算：網站會把整串變成自動連結（只看還沒處理的字，連結的 ](網址) 不算）
       // 原稿這一串（例：*www.e.com*[^1]）裡有網址、又不是 [文字](網址) 或 <網址> 收好的，也不算
       const srcTail = s.slice(0, i).match(/\S*$/)![0];
-      const inUrl = URL_TAIL.test(buf.match(/\S*$/)![0]) || (URL_TAIL.test(srcTail) && !srcTail.includes('](') && !srcTail.endsWith('>'));
-      if (fn && !inUrl && s[i + fn[0].length] !== '(' && s[i + fn[0].length] !== ':') {
+      const inUrl = URL_TAIL.test(buf.match(/\S*$/)![0]) || bareUrlBefore(srcTail) || (EMAIL_TAIL.test(srcTail) && !srcTail.includes('](') && !srcTail.endsWith('>'));
+      if (fn && !inUrl && !ctx.urlCtx && s[i + fn[0].length] !== '(' && s[i + fn[0].length] !== ':') {
         if (!ctx.inDef) ctx.refs.add(fnLabel(fn[1]));
         if (ctx.inLink) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '連結文字裡有腳註引用，網站上不會做成連結；請把腳註移到連結外面', where: clip(fn[0]) });
       }
@@ -423,7 +442,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         const closeAt = findMark(s, i + fmt[0].length, `</${name}>`);
         if (closeAt > 0) {
           flush();
-          out.push({ t: name === 'b' || name === 'strong' ? 'strong' : 'em', c: parseInline(s.slice(i + fmt[0].length, closeAt), ctx, depth + 1) });
+          out.push({ t: name === 'b' || name === 'strong' ? 'strong' : 'em', c: inner(s.slice(i + fmt[0].length, closeAt)) });
           i = closeAt + name.length + 3;
           continue;
         }
@@ -443,7 +462,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       const end = findMark(s, i + mark.length, mark);
       if (end > i + mark.length && !/^\s/.test(s[i + mark.length]) && !/\s$/.test(s.slice(i + mark.length, end))) {
         flush();
-        out.push({ t: strong ? 'strong' : 'em', c: parseInline(s.slice(i + mark.length, end), ctx, depth + 1) });
+        out.push({ t: strong ? 'strong' : 'em', c: inner(s.slice(i + mark.length, end)) });
         i = end + mark.length;
         continue;
       }
@@ -453,7 +472,7 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       const end = findMark(s, i + 1, '_');
       if (end > i + 1 && !/[A-Za-z0-9]/.test(prev) && !/\s/.test(s[i + 1]) && !/[A-Za-z0-9]/.test(s[end + 1] ?? ' ') && !/\s/.test(s[end - 1])) {
         flush();
-        out.push({ t: 'em', c: parseInline(s.slice(i + 1, end), ctx, depth + 1) });
+        out.push({ t: 'em', c: inner(s.slice(i + 1, end)) });
         i = end + 1;
         continue;
       }
@@ -998,8 +1017,22 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
 }
 
 /** 最後的總檢查：行首結構用 tab、腳註定義有沒有被引用與重複。 */
-function finalChecks(ctx: Ctx): void {
+function finalChecks(ctx: Ctx, blocks: Block[]): void {
   const fail = (message: string, where: string) => ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message, where: clip(where) });
+  // 連結被拆壞的跡象：「](」後面直接接一個裸網址（例：*[**c**](https://…)字*，強調先切開了連結）。網站上那是連結，信裡變成吞掉後面字的裸網址
+  let broken = '';
+  const walk = (x: unknown): void => {
+    if (broken || !x || typeof x !== 'object') return;
+    if (Array.isArray(x)) {
+      x.forEach((n, k) => {
+        const prev = x[k - 1] as Inline | undefined;
+        if (n && (n as Inline).t === 'link' && (n as { bare?: boolean }).bare && prev?.t === 'text' && prev.v.endsWith('](')) broken = (n as { href: string }).href;
+      });
+    }
+    for (const v of Object.values(x)) if (v && typeof v === 'object') walk(v);
+  };
+  walk(blocks);
+  if (broken) fail('強調和連結的組合（例：*[**文字**](網址)字*）信裡排不出來，連結會被拆開；請把強調移到連結文字裡面或外面加空格', broken);
   if (ctx.tab) fail('行首的縮排、引言 > 或清單記號後面用了 tab，網站上的排法判不準；請改用空格（程式碼框裡的 tab 不受影響）', ctx.tab);
   const seen = new Set<string>();
   for (const label of ctx.defs) {
@@ -1013,7 +1046,7 @@ export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const ctx = newCtx();
   const { blocks } = parseBlocks(body.split('\n'), ctx);
-  finalChecks(ctx);
+  finalChecks(ctx, blocks);
   // 對帳：原文每一個 <!--，不是被當成註解藏起來，就是落在程式碼裡；對不上＝有一個註解符號跑進了正文（或內容不見了），擋下。
   const total = marks(body);
   if (total !== ctx.hidden + ctx.inCode && !ctx.problems.some((p) => p.code === 'unclosed_comment')) {

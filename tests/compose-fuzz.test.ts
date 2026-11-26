@@ -26,7 +26,7 @@ test(`隨機探測：${N} 份（種子 ${SEED}），三條不變式零違反`, (
 });
 
 // ───────── 五輪覆核留下的每一個反例＋本輪探測找到的寫法：固定下來，跟參照渲染器比對 ─────────
-// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的；「複審」＝修完後第二次審查找到的；「三審」「四審」「五審」＝第三到五次審查找到的。
+// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的；「複審」＝修完後第二次審查找到的；「三審」～「六審」＝第三到六次審查找到的。
 // 名稱、原稿（只有正文）、預期：null＝正確處理（不記 error），字串＝必須記這個 error 擋下
 // 行首結構用 tab 的寫法（引言 > 後、清單記號後、清單續行）一律擋下：主站沒有這種文章，網站的 tab 換算判不準
 const REVIEW_CASES: [string, string, string | null][] = [
@@ -160,6 +160,12 @@ const REVIEW_CASES: [string, string, string | null][] = [
   ['五審 強調裡的網址吃掉腳註引用', '*www.example.com/p*[^a] BODY1X\n\n[^a]: CMT2X', 'unsupported_syntax'],
   ['五審 email 後緊接腳註引用', 'a@example.com_[^a] BODY1X\n\n[^a]: CMT2X', 'unsupported_syntax'],
   ['五審 行內程式碼不跨兩則腳註定義', 'BODY0X[^a] BODY1X[^b]\n\n[^a]: `BODY2X\n[^b]: `CODE3X`', null],
+  ['六審 裸網址吞掉後面的連結與腳註引用', '詳見 https://example.com/p，[BODY1X](https://example.com/x)[^1] BODY2X\n\n[^1]: CMT3X', 'unsupported_syntax'],
+  ['六審 裸網址吞掉後面的強調與反引號', '來源 https://example.com/p，**BODY1X**`BODY2X` BODY3X', 'unsupported_syntax'],
+  ['六審 強調裡的連結被拆開', '*[**BODY1X**](https://example.com)BODY2X*', 'unsupported_syntax'],
+  ['收斂 英數字後的網址不做成連結', 'BODY1Xhttps://example.com/pBODY2X BODY3X', null],
+  ['收斂 註解把網址截斷', 'https://example.com/p<!-- CMT1X -->BODY2X BODY3X', null],
+  ['收斂 網址後強調裡的腳註引用', 'https://example.com/p***~~![^1]** BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
   ['複審 縮排碼後不從 1 開始的有序清單', '\t<!--CODE1X-->\n2)     <!--CMT2X--> BODY3X', 'unsupported_syntax'],
 ];
 
