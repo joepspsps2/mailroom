@@ -9,7 +9,7 @@ import type { IngestOptions } from './events.ts';
 import { FakePostman, type FakeRule, type Postman } from './postman.ts';
 import { parseAllowed, type TestSendDeps } from './test-send.ts';
 import { SesPostman } from './ses.ts';
-import { trackSecrets, trackSigner } from '../track.ts';
+import { trackHost, trackSecrets, trackSigner } from '../track.ts';
 
 export interface BroadcastEnv {
   DB: D1Database;
@@ -135,8 +135,18 @@ export function unsubLinksFromEnv(env: BroadcastEnv) {
 /** 追蹤券（每位收件人、每個連結一張）。沒設鑰匙＝undefined：內容沒用到追蹤佔位就照常寄；用到了 personalize 會丟例外、這期暫停。 */
 export function trackFromEnv(env: BroadcastEnv): TrackFor | undefined {
   const secrets = trackSecrets(env.TRACK_TOKEN_SECRET, env.TRACK_TOKEN_SECRET_PREVIOUS);
-  if (!secrets.length) return undefined;
+  const host = trackHost(env.TRACK_BASE_URL);
+  // 鑰匙、追蹤網址缺一＝追蹤端點不存在：不簽（內容有追蹤佔位就會 render_error 暫停，不寄出點了 404 的信）。
+  if (!secrets.length || !host) return undefined;
+  const origin = `https://${host}`;
   return async (c, r, contents) => {
+    // 內容裡的追蹤佔位必須掛在這個部署的追蹤網址下（compose 的 trackBase 跟 TRACK_BASE_URL 不一致＝連結會壞）。
+    for (const s of contents) {
+      for (const m of s.matchAll(/\{\{\s*(c:\d+|o)\s*\}\}/g)) {
+        const want = m[1] === 'o' ? `${origin}/o/` : `${origin}/c/`;
+        if (s.slice(Math.max(0, m.index - want.length), m.index).toLowerCase() !== want) throw new Error('tracking placeholder is not under TRACK_BASE_URL');
+      }
+    }
     let count: number | null = 0;
     if (c.links) {
       try {

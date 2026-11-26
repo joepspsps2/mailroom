@@ -10,12 +10,13 @@ analytics export reads (`docs/export.md`).
 |---|---|
 | `TRACK_BASE_URL` | the tracking origin, e.g. `https://t.example.com` (https, no path). Route that host to the Worker. Use the same value as `trackBase` when composing. |
 | `TRACK_TOKEN_SECRET` | Secret, at least 16 characters. Signs the per-recipient link and pixel tokens. |
-| `TRACK_TOKEN_SECRET_PREVIOUS` | optional, comma-separated: old secrets still accepted during a rotation (never used to sign). |
+| `TRACK_TOKEN_SECRET_PREVIOUS` | optional, comma-separated: old secrets still accepted during a rotation (never used to sign; if the current secret is missing or too short, tracking is off rather than falling back to an old one). |
 | `TRACK_CONFIG` | optional JSON, only the fields you want to change (see below). |
 
 Without `TRACK_BASE_URL` and a secret, the endpoints do not exist (other routes handle the request as before). Content composed
-with `trackBase` cannot be sent without a secret: rendering fails and the issue pauses (`render_error`) instead of sending links
-that would not work. Issues composed without `trackBase` are sent untracked as before.
+with `trackBase` cannot be sent without both, or when its tracking links are not under `TRACK_BASE_URL`: rendering fails and the
+issue pauses (`render_error`) instead of sending links that would not work. Link destinations are stored normalised
+(`new URL(url).href`: non-ASCII paths percent-encoded), because a redirect header can only carry ASCII. Issues composed without `trackBase` are sent untracked as before.
 
 The desk command `create` stores the issue's link table (`links`, from `compose()`) with the issue. `saveDraft` refuses content
 that uses `{{c:N}}` without a link table entry for every N (`links_missing`), and the link table is part of the content hash, so
@@ -26,7 +27,7 @@ changing where a link goes requires a new approval.
 | Request | Response |
 |---|---|
 | `GET` / `HEAD /c/{token}` | `302` to link N of that issue; records a `click` |
-| `GET` / `HEAD /o/{token}.gif` | a 1×1 transparent GIF, always (also for invalid tokens); records an `open` when the token is valid |
+| `GET` / `HEAD /o/{token}.gif` | a 1×1 transparent GIF, always (also for invalid tokens); records an `open` when the token is valid and the request is a `GET` |
 
 Responses carry `cache-control: no-store` and `referrer-policy: no-referrer`.
 

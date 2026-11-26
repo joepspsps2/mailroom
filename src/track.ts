@@ -80,7 +80,10 @@ async function mac(secret: string, payload: string): Promise<Uint8Array> {
 
 /** 追蹤鑰匙：第一把簽新券，其餘只驗證（換鑰匙過渡期）。每把至少 16 字元，太短的丟掉。 */
 export function trackSecrets(current?: string, previous?: string): string[] {
-  return [current ?? '', ...(previous ?? '').split(',')].map((s) => s.trim()).filter((s) => s.length >= 16);
+  // 目前的鑰匙沒設或太短＝追蹤關閉（不能讓舊鑰匙補位去簽新券：換鑰匙常常就是因為舊的外洩了）。
+  const cur = (current ?? '').trim();
+  if (cur.length < 16) return [];
+  return [cur, ...(previous ?? '').split(',').map((s) => s.trim()).filter((s) => s.length >= 16)];
 }
 
 export interface TrackClaim { kind: TrackKind; campaign: string; contact: number; index: number | null }
@@ -156,13 +159,17 @@ export function checkLinks(v: unknown): StoredLink[] | null {
     if (!x || typeof x !== 'object') return null;
     const { index, url } = x as Record<string, unknown>;
     if (index !== i + 1 || typeof url !== 'string' || url.length > 2000 || !/^https?:\/\/[^\s<>"\u0000-\u001f\u007f]+$/i.test(url)) return null;
+    // 存正規化後的網址（中文路徑變成 %XX、反斜線等瀏覽器會改寫的寫法先改寫好）：轉址標頭只能放 ASCII，也不留解讀不一致的空間。
+    let href: string;
     try {
       const u = new URL(url);
       if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+      href = u.href;
     } catch {
       return null;
     }
-    out.push({ index, url });
+    if (!/^[\x21-\x7e]+$/.test(href) || href.length > 2000) return null;
+    out.push({ index, url: href });
   }
   return out;
 }
@@ -242,7 +249,8 @@ export async function handleTrackRequest(request: Request, deps: TrackDeps): Pro
   if (m[1] === 'o') {
     const token = m[2].endsWith('.gif') ? m[2].slice(0, -4) : '';
     const claim = token ? await verifyTrack(deps.secrets, token, 'o') : null;
-    if (claim && claim.contact > 0) {
+    // HEAD 不是讀者打開信（連結檢查器之類），不記開信。
+    if (claim && claim.contact > 0 && !head) {
       const p = later(recordOpen(deps, claim, facts(request), now));
       if (!deps.waitUntil) await p;
     }
@@ -261,6 +269,10 @@ export async function handleTrackRequest(request: Request, deps: TrackDeps): Pro
   }
   const link = links?.find((l) => l.index === claim.index);
   if (!link) return notFoundLink();
+  if (!/^https?:\/\/[\x21-\x7e]+$/.test(link.url)) {
+    console.error('track link not ascii', claim.campaign, claim.index);
+    return notFoundLink();
+  }
   if (claim.contact > 0) {
     const p = later(recordClick(deps, claim, link, facts(request), now));
     if (!deps.waitUntil) await p;

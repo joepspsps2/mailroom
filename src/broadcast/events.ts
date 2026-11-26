@@ -44,7 +44,9 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
   let contact = ev.contact !== undefined && ev.contact !== null && /^\d{1,15}$/.test(String(ev.contact)) ? Number(ev.contact) : null;
   // 事件可能比「帳本記下郵差 id」更早回來；帳本列在交郵差前就建好了，用去重鍵找得到。
   if (!msg && campaign && contact !== null) {
-    msg = await db.prepare("SELECT id, to_email, stream FROM messages WHERE dedupe_key = ? AND stream = 'marketing' LIMIT 1").bind(`c:${campaign}:${contact}`).first<{ id: number; to_email: string; stream?: string }>();
+    // 歡迎信的標籤是 _welcome-{名單}，去重鍵是 welcome:{名單}:{聯絡人}。
+    const key = campaign.startsWith('_welcome-') ? `welcome:${campaign.slice('_welcome-'.length)}:${contact}` : `c:${campaign}:${contact}`;
+    msg = await db.prepare("SELECT id, to_email, stream FROM messages WHERE dedupe_key = ? AND stream = 'marketing' LIMIT 1").bind(key).first<{ id: number; to_email: string; stream?: string }>();
   }
   if (msg && (campaign === null || contact === null)) {
     const r = await db.prepare('SELECT campaign_id, contact_id FROM campaign_recipients WHERE message_id = ? LIMIT 1').bind(msg.id).first<{ campaign_id: string; contact_id: number }>();

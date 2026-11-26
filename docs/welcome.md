@@ -16,8 +16,11 @@ All of these must hold:
    Imports (`POST /v1/lists/{id}/import`) and segment writes never send one; an imported person (subscribed, unsubscribed or
    removed) is not first-time when they subscribe later.
 4. At sending time they are still subscribed, not on the suppression list, the sender domain is not on hold, the provider is
-   healthy and today's cap has room. A domain hold, an unhealthy provider or a full cap retries every 15 minutes for up to 48
-   hours, then gives up (an old welcome is not sent late).
+   healthy and today's cap has room. A domain hold, an unhealthy provider or a full cap waits: the message is re-queued as a new
+   message every 15 minutes (so it does not use up the queue's retry count) for up to 48 hours from the subscribe, then gives up
+   (an old welcome is not sent late, also when a dead-letter queue is replayed).
+   Welcome mail is not part of the warm-up ladder; it only counts toward today's cap. Keep that in mind while a new sender
+   domain is warming up (or leave the welcome mail off until warm-up is done).
 5. The ledger key `welcome:{list}:{contact}` has not been sent. Two subscribe calls at the same time, or a queue message
    delivered twice, still send one mail.
 

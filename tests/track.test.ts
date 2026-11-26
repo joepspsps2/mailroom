@@ -62,6 +62,8 @@ test('token round trip, rotation, and rejection of forged or altered tokens', as
   assert.equal(await verifyTrack([SECRET], flipped, 'c'), null);
   for (const junk of ['', 'abc', 'a.b', `${t}x`, `${t}.x`, 'Yw.' + 'A'.repeat(22)]) assert.equal(await verifyTrack([SECRET], junk, 'c'), null, junk);
   assert.deepEqual(trackSecrets('short', undefined), [], 'secrets shorter than 16 characters are ignored');
+  assert.deepEqual(trackSecrets('short', OLD), [], 'an invalid current secret turns tracking off instead of signing with the old one');
+  assert.deepEqual(trackSecrets(undefined, OLD), []);
   await assert.rejects(signTrack(SECRET, { kind: 'c', campaign: 'weekly-1', contact: 7, index: 0 }));
   await assert.rejects(signTrack(SECRET, { kind: 'c', campaign: 'Bad Id', contact: 7, index: 1 }));
 });
@@ -263,7 +265,8 @@ test('saveDraft requires a link table covering every {{c:N}}', async () => {
 
 test('broadcast render signs per recipient tokens that the endpoint accepts', async () => {
   const { db, deps } = setup();
-  const track = trackFromEnv({ DB: {} as D1Database, TRACK_TOKEN_SECRET: SECRET });
+  const track = trackFromEnv({ DB: {} as D1Database, TRACK_TOKEN_SECRET: SECRET, TRACK_BASE_URL: 'https://t.example.com' });
+  assert.equal(trackFromEnv({ DB: {} as D1Database, TRACK_TOKEN_SECRET: SECRET }), undefined, 'no tracking host = no signing');
   assert.ok(track);
   const render = personalizeRender(() => ({ unsubscribe_url: 'https://u.example.com/u/x' }), track);
   const c = db.raw.prepare("SELECT * FROM campaigns WHERE id = 'weekly-1'").get() as never;
@@ -288,4 +291,41 @@ test('trackSigner only signs what the content uses', async () => {
   assert.ok(await verifyTrack([SECRET], sign('c', 2), 'c'));
   assert.throws(() => sign('c', 3));
   await assert.rejects(trackSigner(SECRET, 'weekly-1', 7, ['{{c:3}}'], 2));
+});
+
+test('non-ASCII link destinations are stored percent-encoded and redirect cleanly', async () => {
+  assert.deepEqual(checkLinks([{ index: 1, url: 'https://example.com/文章/?q=咖啡' }]), [{ index: 1, url: 'https://example.com/%E6%96%87%E7%AB%A0/?q=%E5%92%96%E5%95%A1' }]);
+  assert.deepEqual(checkLinks([{ index: 1, url: 'https://evil.example\\@a.example/' }])?.[0].url, 'https://evil.example/@a.example/', 'backslash rewritten the way browsers do');
+  const { deps } = setup({ links: [{ index: 1, url: 'https://example.com/%E6%96%87/' }] });
+  const res = (await handleTrackRequest(req(`/c/${await click(7, 1)}`), deps))!;
+  assert.equal(res.headers.get('location'), 'https://example.com/%E6%96%87/');
+  // A raw non-ASCII row (written by hand) is normalised when read, not a crash.
+  const raw = setup({ links: [{ index: 1, url: 'https://example.com/\u6587/' }] });
+  assert.equal((await handleTrackRequest(req(`/c/${await click(7, 1)}`), raw.deps))!.headers.get('location'), 'https://example.com/%E6%96%87/');
+});
+
+test('saveDraft stores the normalised link table', async () => {
+  const db = memoryDb();
+  db.raw.exec(`INSERT INTO lists (id, name, created_at) VALUES ('weekly', 'Weekly', '2027-01-01T00:00:00Z')`);
+  const r = await saveDraft(db, { id: 'weekly-9', list: 'weekly', subject: 's', from: 'n@mail.example.com', html: '<a href="https://t.example.com/c/{{c:1}}">a</a>', text: 't', webUrl: 'https://example.com/p/9', audience: { waves: [['*']] }, links: [{ index: 1, url: 'https://example.com/文章' }] }, { marketingDomain: 'mail.example.com' });
+  assert.equal(r.ok, true);
+  const row = db.raw.prepare("SELECT links FROM campaigns WHERE id = 'weekly-9'").get() as { links: string };
+  assert.equal(JSON.parse(row.links)[0].url, 'https://example.com/%E6%96%87%E7%AB%A0');
+});
+
+test('tracking placeholders under a different host than TRACK_BASE_URL refuse to render', async () => {
+  const { db } = setup();
+  const render = personalizeRender(() => ({ unsubscribe_url: 'https://u.example.com/u/x' }), trackFromEnv({ DB: {} as D1Database, TRACK_TOKEN_SECRET: SECRET, TRACK_BASE_URL: 'https://t.example.com' }));
+  const c = db.raw.prepare("SELECT * FROM campaigns WHERE id = 'weekly-1'").get() as object;
+  const wrong = { ...c, html: '<a href="https://track.other.example/c/{{c:1}}">x</a> {{unsubscribe_url}}', text: '{{unsubscribe_url}}', web_url: 'https://example.com/p/1', headers: null } as never;
+  await assert.rejects(render(wrong, { campaign_id: 'weekly-1', contact_id: 7, email: 'reader@example.com', name: null } as never), /TRACK_BASE_URL/);
+  const pixel = { ...c, html: '<img src="https://t.example.com/c/{{o}}.gif"> {{unsubscribe_url}}', text: '{{unsubscribe_url}}', web_url: 'https://example.com/p/1', headers: null } as never;
+  await assert.rejects(render(pixel, { campaign_id: 'weekly-1', contact_id: 7, email: 'reader@example.com', name: null } as never));
+});
+
+test('HEAD on the open pixel records nothing', async () => {
+  const { db, deps } = setup();
+  const r = (await handleTrackRequest(req(`/o/${await open(7)}.gif`, { method: 'HEAD' }), deps))!;
+  assert.equal(r.status, 200);
+  assert.equal(events(db).length, 0);
 });

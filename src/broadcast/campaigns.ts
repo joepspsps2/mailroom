@@ -180,10 +180,11 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   const bad = checkInput(input, opts.marketingDomain);
   if (bad) return { ok: false, reason: bad };
   if (!(await db.prepare('SELECT id FROM lists WHERE id = ?').bind(input.list).first())) return { ok: false, reason: 'unknown_list' };
-  const hash = await contentHash(input);
+  const hash = await contentHash({ ...input, links: input.links && input.links.length ? checkLinks(input.links) : undefined });
   const audience = JSON.stringify(checkAudience(input.audience));
   const headers = input.headers ? JSON.stringify(input.headers) : null;
-  const links = input.links && input.links.length ? JSON.stringify(input.links.map((l) => ({ index: l.index, url: l.url }))) : null;
+  const normalized = input.links && input.links.length ? checkLinks(input.links) : null;
+  const links = normalized && normalized.length ? JSON.stringify(normalized) : null;
   const t = nowIso(opts.now);
   const existing = await getCampaign(db, input.id);
   // 同一份內容不能用不同期號建兩次（會寄兩封）：網頁版網址（正規化後）、同名單同內文、原稿位置任一相同，且對方沒被取消，就擋。

@@ -250,3 +250,28 @@ test('a name that carries a link or domain is dropped from the welcome mail', as
   await w.settle();
   assert.doesNotMatch(w.welcomes()[0].html + w.welcomes()[0].text, /evil/);
 });
+
+test('welcome waits are re-queued as new messages (they do not use up queue retries), and its events find the ledger row', async () => {
+  const w = await world();
+  await w.db.prepare('INSERT INTO domain_holds (domain, reason, created_at) VALUES (?, ?, ?)').bind(DOMAIN, 'test', w.now().toISOString()).run();
+  await w.subscribe('held@example.com');
+  w.clock.t += 10_000;
+  const sent: unknown[] = [];
+  const orig = w.deps.queue!.sendBatch;
+  w.deps.queue = { sendBatch: async (m) => { sent.push(...m); return orig(m); } };
+  const { consume } = await import('../src/broadcast/dispatch.ts');
+  const msg = w.queue.shift()!.body;
+  const r = await consume(w.deps, msg);
+  assert.equal(r.action, 'ack');
+  assert.match(r.outcome, /requeued/);
+  assert.equal(sent.length, 1);
+  // Release the hold and send; then an early provider event (before provider_id is written) still links to the row.
+  await w.db.prepare('UPDATE domain_holds SET released_at = ?').bind(w.now().toISOString()).run();
+  w.clock.t += 900_000;
+  await w.drain();
+  assert.equal(w.welcomes().length, 1);
+  const { ingestEvent } = await import('../src/broadcast/events.ts');
+  await ingestEvent(w.db, { provider: 'fake', providerEventId: 'early-1', providerMessageId: 'not-yet-known', type: 'delivery', at: w.now().toISOString(), campaign: '_welcome-weekly', contact: '1' });
+  const ev = (await w.db.prepare("SELECT message_id FROM events WHERE provider_event_id = 'early-1'").first()) as { message_id: number | null };
+  assert.ok(ev.message_id);
+});

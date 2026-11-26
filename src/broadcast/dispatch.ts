@@ -600,7 +600,13 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
     return ack(`event:${outcome}`);
   }
   if (msg && typeof msg === 'object' && msg.kind === 'welcome') {
-    return consumeWelcome({ db, postman: deps.postman, domain: deps.domain.toLowerCase(), site: cfg.site, utcOffsetHours: cfg.utcOffsetHours, unsub: deps.unsub ?? { secrets: [] }, now: deps.now }, msg);
+    const w = await consumeWelcome({ db, postman: deps.postman, domain: deps.domain.toLowerCase(), site: cfg.site, utcOffsetHours: cfg.utcOffsetHours, unsub: deps.unsub ?? { secrets: [] }, now: deps.now }, msg);
+    // 等候（網域停寄、額度用完…）改成重新排一則新訊息，不吃 Queue 的重試次數：不然幾次之後就掉進死信佇列，撐不到 48 小時的期限。
+    if (w.action === 'retry' && deps.queue) {
+      await deps.queue.sendBatch([{ body: msg, delaySeconds: w.delaySeconds }]);
+      return ack(`${w.outcome}:requeued`);
+    }
+    return w;
   }
   if (!msg || typeof msg !== 'object' || msg.kind !== 'send' || typeof msg.campaign !== 'string' || !Number.isInteger(msg.contact)) return ack('bad_message');
 
