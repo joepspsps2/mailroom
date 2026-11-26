@@ -70,7 +70,8 @@ test('錯誤分類：限流、每日額度、帳號停、權限、永久、5xx �
   const cases: [Response, string | 'throw'][] = [
     [err(429, 'TooManyRequestsException'), 'throttled'],
     [err(400, 'Throttling', 'Maximum sending rate exceeded.'), 'throttled'],
-    [err(400, 'Throttling', 'Daily message quota exceeded.'), 'account_paused'],
+    [err(400, 'Throttling', 'Daily message quota exceeded.'), 'daily_quota'],
+    [err(400, 'RequestExpired'), 'account_paused'],
     [err(400, 'AccountSuspendedException'), 'account_paused'],
     [err(400, 'SendingPausedException'), 'account_paused'],
     [err(400, 'MailFromDomainNotVerifiedException'), 'account_paused'],

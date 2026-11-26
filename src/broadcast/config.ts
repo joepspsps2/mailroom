@@ -36,6 +36,8 @@ export interface BroadcastConfig {
   stallMinutes: number;
   /** 同一人暫時失敗最多試幾次，之後記成失敗。 */
   maxAttempts: number;
+  /** 最近連續這麼多位都被郵差永久拒收（中間沒有寄成功的）→ 暫停本期（多半是設定問題）。 */
+  permanentStreak: number;
   /** 郵差回限流時，那一封幾秒後再試。 */
   throttleRetrySeconds: number;
   /** 「今天」的時差（小時），每日上限以這個日期換日。 */
@@ -73,6 +75,7 @@ export const DEFAULT_BROADCAST_CONFIG: Readonly<BroadcastConfig> = Object.freeze
   stuckMinutes: 10,
   stallMinutes: 30,
   maxAttempts: 3,
+  permanentStreak: 5,
   throttleRetrySeconds: 30,
   utcOffsetHours: 8,
   limitsRefreshMinutes: 60,

@@ -237,7 +237,7 @@ export default {
       if (!topicArns.length || !env.SES_REGION) return notFound();
       const size = bodySizeProblem(request.headers.get('content-length'), MAX_WEBHOOK_BYTES);
       if (size) return new Response(size, { status: size === 'missing' ? 411 : 413 });
-      const r = await handleSesWebhook(env.DB, await request.text(), { region: env.SES_REGION, topicArns, allowSha1: env.SES_SNS_ALLOW_SHA1 === 'true' }, request.headers.get('x-amz-sns-message-type'));
+      const r = await handleSesWebhook(env.DB, await request.text(), { region: env.SES_REGION, topicArns, configurationSet: env.SES_CONFIGURATION_SET, allowSha1: env.SES_SNS_ALLOW_SHA1 === 'true' }, request.headers.get('x-amz-sns-message-type'));
       (r.status === 200 ? console.log : console.warn)('ses webhook', r.status, r.outcome.slice(0, 200));
       return new Response(r.status === 200 ? 'ok' : 'rejected', { status: r.status });
     }

@@ -277,7 +277,7 @@ test('送達會中斷「連續暫時退信」', async () => {
   assert.equal(await suppressedReason(db, 'a@example.com', 'marketing'), null);
 });
 
-test('正規化：每種事件 → 對的型別；收件人只認原信收件人（單一收件人時對不上算給他，多收件人對不上不認）', () => {
+test('正規化：每種事件 → 對的型別；收件人只認原信收件人（列了別的地址不認；沒列地址且單一收件人才算他）', () => {
   const n = (body: string) => normalizeSesEvent(JSON.parse(body), 'sns-1');
   assert.deepEqual(n(sesEvent('Send', 'a@example.com', { send: {} })).map((e) => [e.type, e.email, e.campaign, e.contact]), [['send', 'a@example.com', 'weekly-1', '1']]);
   assert.equal(n(sesEvent('Reject', 'a@example.com', { reject: { reason: 'Bad content' } }))[0].type, 'reject');
@@ -285,9 +285,12 @@ test('正規化：每種事件 → 對的型別；收件人只認原信收件人
   assert.deepEqual(n(sesEvent('DeliveryDelay', 'a@example.com', { deliveryDelay: { delayType: 'MailboxFull', delayedRecipients: [{ emailAddress: 'a@example.com' }] } })).map((e) => [e.type, e.subtype]), [['delay', 'MailboxFull']]);
   assert.deepEqual(n(sesEvent('Open', 'a@example.com', { open: {} })), []);
   assert.deepEqual(n(sesEvent('Click', 'a@example.com', { click: {} })), []);
-  // 轉寄目的地退信：原信只有一個收件人 → 算在他身上
+  // 轉寄目的地退信：事件列的是別的地址 → 不認（不能把讀者封鎖）
   const fwd = sesEvent('Bounce', 'a@example.com', { bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: 'forward@example.org' }] } });
-  assert.deepEqual(n(fwd).map((e) => e.email), ['a@example.com']);
+  assert.deepEqual(n(fwd), []);
+  // 事件完全沒列收件人、原信只有一位 → 算他
+  const unlisted = sesEvent('Delivery', 'a@example.com', { delivery: { recipients: [] } });
+  assert.deepEqual(n(unlisted).map((e) => e.email), ['a@example.com']);
   const multi = sesEvent('Bounce', 'a@example.com', { bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: 'forward@example.org' }] } }, { destination: ['a@example.com', 'b@example.com'] });
   assert.deepEqual(n(multi), []);
   // 子類型 → cause
@@ -302,4 +305,38 @@ test('正規化：每種事件 → 對的型別；收件人只認原信收件人
   // 沒有 mail.messageId、不是物件 → 不認
   assert.deepEqual(normalizeSesEvent({ eventType: 'Bounce' }, 'x'), []);
   assert.deepEqual(normalizeSesEvent('nope', 'x'), []);
+});
+
+test('別的設定組的事件不處理（同一個帳號或主題的其他寄信不影響拒收名單）', async () => {
+  const db = await world();
+  const { opts } = setupNet();
+  const o = { ...opts, configurationSet: 'mailroom-events' };
+  const foreign = signed({ Type: 'Notification', Message: complaint('a@example.com') }); // tag 是 newsletter-events
+  assert.equal((await post(db, foreign, o)).outcome, 'ignored:Complaint');
+  assert.equal(await suppressedReason(db, 'a@example.com', 'marketing'), null);
+  const ours = signed({ Type: 'Notification', Message: complaint('a@example.com') });
+  assert.equal((await post(db, ours, { ...o, configurationSet: 'newsletter-events' })).outcome, 'complaint:recorded');
+});
+
+test('SES 因帳號層級拒收名單根本沒寄（OnAccountSuppressionList）：只記事件，不重新封鎖、不退訂', async () => {
+  const db = await world();
+  const { opts } = setupNet();
+  assert.equal((await post(db, signed({ Type: 'Notification', Message: bounce('a@example.com', 'Permanent', 'OnAccountSuppressionList') }), opts)).outcome, 'bounce:recorded');
+  const c = sesEvent('Complaint', 'b@example.com', { complaint: { complainedRecipients: [{ emailAddress: 'b@example.com' }], complaintSubType: 'OnAccountSuppressionList' } });
+  assert.equal((await post(db, signed({ Type: 'Notification', Message: c }), opts)).outcome, 'complaint:recorded');
+  assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), null);
+  assert.equal(await suppressedReason(db, 'b@example.com', 'transactional'), null);
+  assert.equal(member(db, 'weekly', 'b@example.com').status, 'subscribed');
+  assert.equal(count(db, 'events'), 2);
+});
+
+test('帳本列的收件人跟事件地址不同：不把事件算到那位讀者（用標籤對到的列也一樣）', async () => {
+  const { ingestEvent } = await import('../src/broadcast/events.ts');
+  const db = await world();
+  db.raw.prepare("INSERT INTO messages (stream, tier, site, dedupe_key, kind, to_email, from_addr, subject, status, attempts, created_at, updated_at, provider_id) VALUES ('marketing','marketing','newsletter','c:weekly-1:1','newsletter','a@example.com','n@mail.example.com','s','sent',1,'x','x','ses-x')").run();
+  await ingestEvent(db, { provider: 'ses', providerEventId: 'e-1', providerMessageId: 'other-id', type: 'complaint', at: '2027-03-01T00:00:00Z', email: 'stranger@example.org', campaign: 'weekly-1', contact: '1' });
+  assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), null);
+  assert.equal(await suppressedReason(db, 'stranger@example.org', 'transactional'), 'complaint');
+  const ev = db.raw.prepare("SELECT message_id, campaign_id FROM events WHERE provider_event_id = 'e-1'").get() as { message_id: number | null; campaign_id: string | null };
+  assert.deepEqual({ ...ev }, { message_id: null, campaign_id: null });
 });

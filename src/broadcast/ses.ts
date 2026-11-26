@@ -9,7 +9,7 @@
 // 錯誤分類（SES 沒有冪等鍵：沒拿到明確答覆就不能假設沒寄出）：
 // - 200＋MessageId → ok。
 // - 限流（TooManyRequestsException、Throttling…，「每秒上限」那種）→ throttled（引擎延遲再試）。
-// - 「每日額度用完」→ account_paused（引擎暫停這期，不在這裡無限重試）。
+// - 「每日額度用完」→ daily_quota（引擎今天停放水、明天自動恢復；不在這裡無限重試）。
 // - 帳號被停／暫停、寄件網域沒驗證、設定組不存在、鑰匙或權限錯（403）→ account_paused（每一封都會一樣失敗，停下來查）。
 // - 其他 4xx（地址不合格、沙盒沒驗證的收件人、內容被拒）→ permanent（只影響這一位）。
 // - 5xx、逾時、連線錯、回應讀不懂 → 丟例外＝不知道有沒有寄出（引擎記 uncertain、絕不自動重寄）。
@@ -44,7 +44,7 @@ const THROTTLE_CODES = new Set(['TooManyRequestsException', 'Throttling', 'Throt
 const PAUSE_CODES = new Set([
   'AccountSuspendedException', 'SendingPausedException', 'MailFromDomainNotVerifiedException', 'NotFoundException',
   'AccessDeniedException', 'UnrecognizedClientException', 'InvalidSignatureException', 'SignatureDoesNotMatch', 'InvalidClientTokenId',
-  'ExpiredTokenException', 'MissingAuthenticationTokenException', 'IncompleteSignatureException',
+  'ExpiredTokenException', 'MissingAuthenticationTokenException', 'IncompleteSignatureException', 'RequestExpired', 'RequestTimeTooSkewed',
 ]);
 
 /** 非 ASCII 的顯示名稱用 RFC 2047 編碼（SES 要求）；地址本身照舊。 */
@@ -73,7 +73,7 @@ function errorMessage(body: Record<string, unknown>): string {
 
 export function classifySesError(status: number, code: string, message: string): Exclude<PostmanOutcome, { ok: true }> | null {
   if (status >= 500) return null; // 不知道有沒有收下
-  if (/daily message quota exceeded/i.test(message)) return { ok: false, kind: 'account_paused', error: `${status} ${code} daily_quota_exceeded` };
+  if (/daily message quota exceeded/i.test(message)) return { ok: false, kind: 'daily_quota', error: `${status} ${code} daily_quota_exceeded` };
   if (status === 429 || THROTTLE_CODES.has(code)) return { ok: false, kind: 'throttled', error: `${status} ${code}` };
   if (status === 403 || PAUSE_CODES.has(code)) return { ok: false, kind: 'account_paused', error: `${status} ${code}` };
   if (status >= 400) return { ok: false, kind: 'permanent', error: `${status} ${code}` };

@@ -26,8 +26,8 @@ SES has no idempotency key, so the postman only reports "not sent" when SES gave
 |---|---|---|
 | 200 with `MessageId` | ok | ledger row `sent` |
 | 429, `TooManyRequestsException`, `Throttling` (rate) | `throttled` | that mail retries in 30 s, the next minute releases half |
-| `Throttling` "Daily message quota exceeded" | `account_paused` | issue paused (no retry loop) |
-| `AccountSuspendedException`, `SendingPausedException`, `MailFromDomainNotVerifiedException`, `NotFoundException` (configuration set), any 403 (keys, permissions) | `account_paused` | issue paused: every mail would fail the same way |
+| `Throttling` "Daily message quota exceeded" | `daily_quota` | no more releases today (`daily_limit`), resumes tomorrow |
+| `AccountSuspendedException`, `SendingPausedException`, `MailFromDomainNotVerifiedException`, `NotFoundException` (configuration set), `RequestExpired` (clock), any 403 (keys, permissions) | `account_paused` | issue paused: every mail would fail the same way |
 | other 4xx (`MessageRejected`, `BadRequestException`, e.g. an unverified recipient in the sandbox) | `permanent` | that recipient `failed` |
 | 5xx, timeout, network error, 200 without `MessageId` | throws | recipient marked `uncertain`, never re-sent automatically |
 
@@ -64,9 +64,22 @@ Notifications are normalised to provider events (one per recipient) and handed t
 | `DeliveryDelay` | `delay` | — |
 | `Open`, `Click`, `Subscription` | — | ignored (opens and clicks are tracked by the engine itself) |
 
-A recipient named in an event only counts if it was a recipient of the original message (`mail.destination`). mailroom
-sends one recipient per message, so an event naming a different address (for example the target of an automatic
-forward) is attributed to that one recipient.
+Only events from `SES_CONFIGURATION_SET` (the `ses:configuration-set` tag) are used. A recipient named in an event only
+counts if it was a recipient of the original message (`mail.destination`); an event that names a different address (for
+example the target of an automatic forward) is recorded nowhere and changes nothing. An event that names no recipient at
+all is attributed to the message's single recipient.
+
+Bounces with subtype `OnAccountSuppressionList` (and the tenant / email-validation variants) and complaints with
+`complaintSubType: OnAccountSuppressionList` mean SES did not send the message because the address is already on the
+SES account-level suppression list. They are recorded as events but do not touch mailroom's suppression list or list
+memberships. If you lift a suppression in mailroom (`/v1/unsuppress`), remove the address from the SES account-level
+list too, or SES will keep dropping its newsletter mail.
+
+`Throttling` "Daily message quota exceeded" stops releases for the rest of the local day (`daily_limit`), like the
+engine's own cap; it does not pause the issue. Five permanent rejections in a row with nothing delivered in between
+(`permanentStreak`) pause the issue: that is almost always a configuration problem, not five bad addresses.
+
+Only the commercial AWS partition is supported (`amazonaws.com`); certificate URLs on other partitions are refused.
 
 ## Setup
 

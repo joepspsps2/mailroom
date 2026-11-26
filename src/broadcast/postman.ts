@@ -4,7 +4,8 @@
 // 引擎不做自動切換（一個郵差出事多半是名單或內容的問題，自動換只會把問題帶到第二個帳號）。
 //
 // 送一封的結果一定要分清楚「確定沒寄出」與「不知道」：
-// - temporary／permanent／throttled／account_paused＝郵差明確說沒收下（引擎可以安全地再試或停下）。
+// - temporary／permanent／throttled／daily_quota／account_paused＝郵差明確說沒收下（引擎可以安全地再試或停下）。
+//   daily_quota＝郵差的 24 小時額度用完：今天停放水、明天自動恢復（不踩紅燈煞車）。
 // - 丟例外＝不知道有沒有寄出 → 引擎把那一位記成 uncertain、絕不自動重寄（寧可漏一封也不寄兩封）。
 
 import type { TransientCause } from '../feedback.ts';
@@ -28,7 +29,7 @@ export interface PostmanMail {
 
 export type PostmanOutcome =
   | { ok: true; providerId: string }
-  | { ok: false; kind: 'temporary' | 'permanent' | 'throttled' | 'account_paused'; error: string };
+  | { ok: false; kind: 'temporary' | 'permanent' | 'throttled' | 'daily_quota' | 'account_paused'; error: string };
 
 export interface PostmanLimits {
   /** 每秒最多幾封。 */
@@ -64,6 +65,11 @@ export interface ProviderEvent {
    * 'content'（內容／附件被拒、信太大）不累計；沒給＝不累計（一般性、無法判定的暫時退信都屬這類）。
    */
   cause?: TransientCause | null;
+  /**
+   * true＝只記事件、不交給 applyFeedback（不進拒收、不退訂）。例：SES 因為收件人已在 SES 自己的帳號層級拒收名單
+   *（OnAccountSuppressionList）而根本沒寄——那是舊紀錄的回音，不是新的退信或檢舉。
+   */
+  skipFeedback?: boolean;
   at: string;
   email?: string | null;
   campaign?: string | null;
@@ -83,6 +89,7 @@ export type FakeOutcome =
   | 'temporary' // 郵差回暫時失敗（沒收下）
   | 'permanent' // 郵差回永久失敗（沒收下）
   | 'throttle' // 郵差回限流（沒收下）
+  | 'daily_quota' // 郵差說今天 24 小時額度用完（沒收下）
   | 'account_paused' // 郵差說帳號被停（沒收下）
   | 'crash'; // 郵差丟例外（不知道有沒有寄出）
 
@@ -179,6 +186,8 @@ export class FakePostman implements Postman {
         return { ok: false, kind: 'permanent', error: 'fake permanent failure' };
       case 'throttle':
         return { ok: false, kind: 'throttled', error: 'fake throttling' };
+      case 'daily_quota':
+        return { ok: false, kind: 'daily_quota', error: 'fake daily quota exceeded' };
       case 'account_paused':
         return { ok: false, kind: 'account_paused', error: 'fake account paused' };
       case 'crash':

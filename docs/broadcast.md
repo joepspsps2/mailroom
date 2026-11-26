@@ -141,7 +141,7 @@ An `unsubscribe` event that names an issue unsubscribes the person from that iss
 `FakePostman` sends nothing. Addresses whose local part is `success`, `bounce`, `complaint`, `ooto` or
 `suppressionlist` (optionally `+tag`) behave like a provider's mailbox simulator and produce the matching events after a
 short delay. `rules` can make any address answer `temporary`, `permanent`, `throttle`, `account_paused`, `delay`,
-`soft_bounce` (a mailbox-full transient bounce) or `crash` (throw), optionally only the first `times` calls. In the Worker, set
+`daily_quota`, `soft_bounce` (a mailbox-full transient bounce) or `crash` (throw), optionally only the first `times` calls. In the Worker, set
 `NEWSLETTER_POSTMAN = "fake"`; its events come back through the broadcast queue.
 
 ## Worker setup

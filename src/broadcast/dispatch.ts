@@ -496,7 +496,7 @@ const ack = (outcome: string): ConsumeResult => ({ action: 'ack', outcome });
 type LedgerOutcome =
   | { kind: 'sent' | 'duplicate'; messageId: number }
   | { kind: 'in_flight' | 'uncertain'; messageId: number }
-  | { kind: 'failed'; messageId: number; postman: 'temporary' | 'permanent' | 'throttled' | 'account_paused'; error: string }
+  | { kind: 'failed'; messageId: number; postman: 'temporary' | 'permanent' | 'throttled' | 'daily_quota' | 'account_paused'; error: string }
   | { kind: 'rejected'; error: string };
 
 /** 記帳＋交郵差（電子報版）。帳本列先建（sending），交郵差、再回寫；不重搶放久的 sending 列。 */
@@ -681,6 +681,13 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
         await progress();
         return { action: 'retry', delaySeconds: cfg.throttleRetrySeconds, outcome: 'throttled' };
       }
+      if (out.postman === 'daily_quota') {
+        // 郵差說今天額度用完（例：別的寄信也佔了滾動 24 小時額度、或已用量讀數落後）：今天不再放水，明天照常。
+        await db.prepare("UPDATE throttle_days SET \"limit\" = MIN(\"limit\", sent), paused = 1, reason = 'daily_limit' WHERE domain = ? AND day = ?").bind(deps.domain, day).run();
+        await setState('planned', { messageId: out.messageId, error: out.error });
+        await progress();
+        return ack('daily_limit');
+      }
       if (out.postman === 'account_paused') {
         await setState('planned', { messageId: out.messageId, error: out.error });
         await brake(ctx, c.id, 'brake:provider_account_paused');
@@ -693,6 +700,13 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
       }
       await setState('failed', { messageId: out.messageId, error: out.error, attemptsPlus: 1 });
       await progress();
+      if (out.postman === 'permanent') {
+        // 一封接一封都被郵差永久拒收（例：寄件身分沒驗證、沙盒裡收件人沒驗證）多半是設定問題，不是讀者的問題：停下來查，不要把整份名單逐一記失敗。
+        const recent = (await db.prepare("SELECT state, error FROM campaign_recipients WHERE campaign_id = ? AND state IN ('done', 'failed') ORDER BY done_at DESC LIMIT ?").bind(c.id, cfg.permanentStreak).all<{ state: string; error: string | null }>()).results;
+        if (recent.length >= cfg.permanentStreak && recent.every((x) => x.state === 'failed' && / permanent /.test(` ${x.error ?? ''} `))) {
+          await brake(ctx, c.id, `brake:permanent_streak:${cfg.permanentStreak}`);
+        }
+      }
       return ack(`failed_${out.postman}`);
   }
 }

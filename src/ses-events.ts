@@ -265,15 +265,18 @@ function tag(tags: unknown, name: string): string | null {
 }
 
 /**
- * 事件說的收件人，只認原信收件人裡有的（mail.destination）。郵務室一封信只寄一個人：
- * 事件的地址對不上（例：讀者自動轉寄，退信報的是轉寄目的地）時，算在那唯一的收件人身上；
- * 原信有多個收件人又對不上 → 不認（不能猜是誰）。
+ * 事件說的收件人，只認原信收件人裡有的（mail.destination）。
+ * 事件沒列任何地址、原信只有一位收件人 → 算他的；事件列了地址卻對不上（例：讀者自動轉寄，退信報的是轉寄目的地）→ 不認，
+ * 不能把轉寄目的地的退信算成讀者自己的信箱壞了。
  */
-function recipients(listed: string[], destination: string[]): string[] {
+function recipients(listed: string[], destination: string[], anyListed: boolean): string[] {
   const matched = listed.filter((a) => destination.includes(a));
   if (matched.length) return [...new Set(matched)];
-  return destination.length === 1 ? destination : [];
+  return !anyListed && destination.length === 1 ? destination : [];
 }
+
+/** SES 根本沒寄（收件人已在 SES 自己的拒收名單）：只記事件，不當成新的退信或檢舉。 */
+const NOT_SENT_SUBTYPES = new Set(['OnAccountSuppressionList', 'OnTenantSuppressionList', 'EmailValidationSuppressed']);
 
 /** SES 暫時退信子類型 → 給 applyFeedback 的原因。只有信箱滿算信箱層級；原因不明的不給（不累計）。 */
 export function transientCause(subType: string | null): 'mailbox' | 'content' | undefined {
@@ -283,9 +286,11 @@ export function transientCause(subType: string | null): 'mailbox' | 'content' | 
 }
 
 /** 一則 SES 事件 → 0～多則 ProviderEvent（每個收件人一則）。Open、Click、Subscription 不處理（開信點擊自己追蹤）。 */
-export function normalizeSesEvent(ev: unknown, snsMessageId: string): ProviderEvent[] {
+export function normalizeSesEvent(ev: unknown, snsMessageId: string, opts: { configurationSet?: string } = {}): ProviderEvent[] {
   if (!ev || typeof ev !== 'object') return [];
   const e = ev as SesEvent;
+  // 只收自己設定組的事件：同一個帳號或主題裡別的寄信不能影響我們的拒收名單。
+  if (opts.configurationSet && tag(e.mail?.tags, 'ses:configuration-set') !== opts.configurationSet) return [];
   const kind = str(e.eventType) ?? str(e.notificationType);
   const mail = e.mail ?? {};
   const providerMessageId = str(mail.messageId);
@@ -305,20 +310,21 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string): ProviderEv
       ...extra,
     }));
   const listed = (v: unknown, field: string) => (Array.isArray(v) ? v.map((r) => addr(field ? (r as Record<string, unknown>)?.[field] : r)).filter((a): a is string => !!a) : []);
+  const pick = (v: unknown, field: string) => recipients(listed(v, field), destination, Array.isArray(v) && v.length > 0);
 
   switch (kind) {
     case 'Send':
       return make('send', destination.slice(0, 1), mail.timestamp);
     case 'Delivery': {
       const d = e.delivery ?? {};
-      return make('delivery', recipients(listed(d.recipients, ''), destination), d.timestamp);
+      return make('delivery', pick(d.recipients, ''), d.timestamp);
     }
     case 'Bounce': {
       const b = e.bounce ?? {};
       const type = str(b.bounceType, 40) ?? 'Undetermined';
       const subType = str(b.bounceSubType, 60);
       const rs = Array.isArray(b.bouncedRecipients) ? (b.bouncedRecipients as Record<string, unknown>[]) : [];
-      const list = recipients(listed(rs, 'emailAddress'), destination);
+      const list = pick(rs, 'emailAddress');
       return list.map((email, i) => {
         const r = rs.find((x) => addr(x?.emailAddress) === email) ?? {};
         const cause = type === 'Transient' ? transientCause(subType) : undefined;
@@ -328,6 +334,7 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string): ProviderEv
           // 只有 bounceType 正好是 Permanent 才是硬退信；Undetermined、Transient 都不是。
           subtype: type === 'Permanent' ? 'Permanent' : type === 'Transient' ? 'Transient' : 'Undetermined',
           ...(cause ? { cause } : {}),
+          ...(subType && NOT_SENT_SUBTYPES.has(subType) ? { skipFeedback: true } : {}),
           detail: { bounceSubType: subType, status: str(r.status, 20), diagnosticCode: str(r.diagnosticCode, 200), feedbackId: str(b.feedbackId, 120) },
         };
       });
@@ -336,8 +343,10 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string): ProviderEv
       const c = e.complaint ?? {};
       // 「不是垃圾信」是更正，不是檢舉。
       if (str(c.complaintFeedbackType) === 'not-spam') return [];
-      return make('complaint', recipients(listed(c.complainedRecipients, 'emailAddress'), destination), c.timestamp, {
+      const notSent = NOT_SENT_SUBTYPES.has(str(c.complaintSubType, 60) ?? '');
+      return make('complaint', pick(c.complainedRecipients, 'emailAddress'), c.timestamp, {
         subtype: str(c.complaintFeedbackType, 40),
+        ...(notSent ? { skipFeedback: true } : {}),
         detail: { feedbackType: str(c.complaintFeedbackType, 40), complaintSubType: str(c.complaintSubType, 60), feedbackId: str(c.feedbackId, 120) },
       });
     }
@@ -347,7 +356,7 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string): ProviderEv
       return make('reject', destination, mail.timestamp, { subtype: 'RenderingFailure', detail: { error: str(e.failure?.errorMessage, 200) } });
     case 'DeliveryDelay': {
       const d = e.deliveryDelay ?? {};
-      return make('delay', recipients(listed(d.delayedRecipients, 'emailAddress'), destination), d.timestamp, { subtype: str(d.delayType, 40) });
+      return make('delay', pick(d.delayedRecipients, 'emailAddress'), d.timestamp, { subtype: str(d.delayType, 40) });
     }
     default:
       return [];
@@ -357,6 +366,8 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string): ProviderEv
 // ---------- HTTP 入口 ----------
 
 export interface SesWebhookOptions extends SnsVerifyOptions {
+  /** 只收這個 SES 設定組的事件（mail.tags 的 ses:configuration-set）。強烈建議設；沒設＝不檢查。 */
+  configurationSet?: string;
   ingest?: IngestOptions;
 }
 
@@ -399,7 +410,7 @@ export async function handleSesWebhook(db: Db, body: string, opts: SesWebhookOpt
   } catch {
     ses = null;
   }
-  const events = normalizeSesEvent(ses, msg.MessageId);
+  const events = normalizeSesEvent(ses, msg.MessageId, { configurationSet: opts.configurationSet });
   const outcomes: string[] = [];
   for (const ev of events) outcomes.push(`${ev.type}:${await ingestEvent(db, ev, opts.ingest)}`);
   const kind = ses && typeof ses === 'object' ? String((ses as SesEvent).eventType ?? (ses as SesEvent).notificationType ?? 'unknown').slice(0, 40) : 'unparsed';
