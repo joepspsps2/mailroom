@@ -17,6 +17,11 @@ Your apps hand a message to one Worker; the Worker does everything it can to get
 
 It is **not** a newsletter or marketing-email system: there are no lists, campaigns, open/click tracking or unsubscribe pages. Requests with `stream: "marketing"` are rejected. It is not for cold email, and never will be — only send to people who asked to hear from you.
 
+## Composing (preview)
+
+The `@joelincc/mailroom/compose` entry point turns a markdown source into an email (HTML + plain text), personalises it, and
+runs a pre-send check that refuses to schedule a broken issue. It does not send anything. See [docs/composing.md](docs/composing.md).
+
 ## How it works
 
 ```
