@@ -42,9 +42,11 @@ Also understood: `<https://…>` autolinks, `<a href="…">text</a>` (only the `
 attribute is dropped and the link goes through the normal checks and tracking), and paired `<b>` / `<strong>` / `<i>` / `<em>`.
 HTML character references (`&nbsp;`, `&amp;`, `&#39;` …) are decoded once and escaped once.
 
+HTML comments (`<!-- … -->`) are removed wherever they appear — on their own line, right under a paragraph, inside a list item, inline, or across lines — except inside a code fence. A line that holds only `<div …>` or `</div>` (for example a language wrapper) is dropped and its content converted normally.
+
 Everything else is **not** passed through: an unknown tag or an unknown block syntax (for example `:::note`) is recorded
 as an `error` problem and the pre-send check fails, so nothing half-converted can be sent. So are an unclosed `<!--` comment
-(`unclosed_comment`) and an unclosed code fence (`unclosed_fence`) — both would silently swallow the rest of the issue.
+(`unclosed_comment`, wherever it starts) and an unclosed code fence (`unclosed_fence`) — both would silently swallow the rest of the issue; the text after them is kept in the output.
 The exception is content that cannot work in an email — `<iframe>`, `<video>`, `<audio>`, `<embed>`, `<object>`, `<canvas>`
 and a ```` ```mermaid ```` fence: it becomes a "view on the website" link card and an `info` problem.
 
@@ -80,7 +82,7 @@ expands everything in a single pass (a name containing `{{email}}` stays literal
 ## Pre-send check
 
 ```ts
-const check = await preflight(issue, { template, webUrl });   // check.ok === false ⇒ do not schedule
+const check = await preflight(issue, { template, webUrl });   // schedule only if check.ok && check.linksChecked && check.webChecked
 ```
 
 Every `error` blocks scheduling. `warn` and `info` are recorded only. The result also carries `linksChecked` and `webChecked`:

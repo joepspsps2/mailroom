@@ -38,12 +38,12 @@ function htmlRefs(html: string): { imgs: { src: string; alt: string | null }[]; 
   const body = html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
   const imgs: { src: string; alt: string | null }[] = [];
   for (const m of body.matchAll(/<img\b[^>]*>/gi)) {
-    const src = m[0].match(/\bsrc="([^"]*)"/i);
-    const alt = m[0].match(/\balt="([^"]*)"/i);
-    imgs.push({ src: dec(src?.[1] ?? ''), alt: alt ? dec(alt[1]) : null });
+    const src = m[0].match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const alt = m[0].match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    imgs.push({ src: dec(src?.[1] ?? src?.[2] ?? ''), alt: alt ? dec(alt[1] ?? alt[2] ?? '') : null });
   }
   const hrefs: string[] = [];
-  for (const m of body.matchAll(/<a\b[^>]*\bhref="([^"]*)"/gi)) hrefs.push(dec(m[1]));
+  for (const m of body.matchAll(/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) hrefs.push(dec(m[1] ?? m[2] ?? ''));
   return { imgs, hrefs };
 }
 
@@ -166,7 +166,8 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
     const targets = new Map<string, 'link' | 'image' | 'web'>();
     for (const l of c.links) targets.set(l.original, 'link');
     const skipHref = (h: string) => h === '' || h.startsWith('{{') || /^(mailto:|tel:|#)/i.test(h) || /\/c\/\{\{c:\d+\}\}$/.test(h);
-    for (const h of refs.hrefs) if (!skipHref(h) && !targets.has(h)) targets.set(h, 'link');
+    const finalUrls = new Set(c.links.map((l) => l.url)); // 沒有追蹤網址時 HTML 裡放的是加了 utm 的網址，已用原網址查過，不重複打
+    for (const h of refs.hrefs) if (!skipHref(h) && !targets.has(h) && !finalUrls.has(h)) targets.set(h, 'link');
     for (const i of refs.imgs) if (i.src && !isPixel(i.src)) targets.set(i.src, 'image');
     if (opts.webUrl) targets.set(opts.webUrl, 'web');
     const list = [...targets.entries()];
