@@ -40,6 +40,9 @@
   // "queues": { "consumers": [{ "queue": "mailroom-email-events", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 5 }] },
   // Newsletter broadcasting (preview, see docs/broadcast.md). Off unless MARKETING_DOMAIN, NEWSLETTER_POSTMAN and the BROADCAST queue are all set.
   // Add to "vars": "MARKETING_DOMAIN": "mail.example.com", "NEWSLETTER_POSTMAN": "fake", "NEWSLETTER_MAX_PER_DAY": 3000
+  // Amazon SES instead of the fake postman (docs/ses.md): "NEWSLETTER_POSTMAN": "ses", "SES_REGION": "us-east-1",
+  //   "SES_CONFIGURATION_SET": "newsletter-events", "SES_SNS_TOPIC_ARNS": "arn:aws:sns:us-east-1:123456789012:newsletter-events"
+  //   and Secrets SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY.
   // "queues": {
   //   "producers": [{ "binding": "BROADCAST", "queue": "mailroom-broadcast" }],
   //   "consumers": [{ "queue": "mailroom-broadcast", "max_batch_size": 10, "max_concurrency": 1, "max_retries": 10, "dead_letter_queue": "mailroom-broadcast-dlq" }]

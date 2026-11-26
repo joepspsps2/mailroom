@@ -8,6 +8,7 @@ import { consumeBatch, tick, type BroadcastDeps, type BroadcastMessage, type Que
 import type { IngestOptions } from './events.ts';
 import { FakePostman, type FakeRule, type Postman } from './postman.ts';
 import { parseAllowed, type TestSendDeps } from './test-send.ts';
+import { SesPostman } from './ses.ts';
 
 export interface BroadcastEnv {
   DB: D1Database;
@@ -21,8 +22,15 @@ export interface BroadcastEnv {
   BROADCAST_CONFIG?: string | Record<string, unknown>;
   /** 自己的每日上限（覆寫 BROADCAST_CONFIG 的 maxPerDay）。 */
   NEWSLETTER_MAX_PER_DAY?: string | number;
-  /** 電子報的郵差：目前只有 "fake"（開發與演習用，不真的寄）。沒設＝群發關閉。 */
+  /** 電子報的郵差："ses"（Amazon SES）或 "fake"（開發與演習用，不真的寄）。沒設＝群發關閉。 */
   NEWSLETTER_POSTMAN?: string;
+  /** SES 地區（例 us-east-1）。郵差與事件入口共用。 */
+  SES_REGION?: string;
+  /** SES 寄信鑰匙（Secret）：IAM 只給 ses:SendEmail 與 ses:GetAccount。 */
+  SES_ACCESS_KEY_ID?: string;
+  SES_SECRET_ACCESS_KEY?: string;
+  /** SES 設定組（事件發布到 SNS）。 */
+  SES_CONFIGURATION_SET?: string;
   /** 假郵差設定（JSON）：{ "rules": [{ "match": "bounce", "outcome": "hard_bounce" }], "limits": { "perSecond": 1, "perDay": 200 } }。 */
   FAKE_POSTMAN?: string | Record<string, unknown>;
   /** 退訂券（與退訂模組共用）：每封信的退訂連結與一鍵退訂標頭靠它們產生；沒設＝每期都會因 render_error 暫停。 */
@@ -60,6 +68,22 @@ function postmanFor(env: BroadcastEnv): Postman | null {
         await env.BROADCAST?.send({ kind: 'event', event }, { delaySeconds: Math.max(1, Math.min(43_200, Math.ceil(delayMs / 1000))) });
       },
     });
+  }
+  if (env.NEWSLETTER_POSTMAN === 'ses') {
+    if (!env.SES_REGION || !env.SES_ACCESS_KEY_ID || !env.SES_SECRET_ACCESS_KEY || !env.SES_CONFIGURATION_SET) {
+      console.error('ses postman needs SES_REGION, SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY, SES_CONFIGURATION_SET; broadcasting disabled');
+      return null;
+    }
+    try {
+      return new SesPostman({
+        region: env.SES_REGION,
+        credentials: { accessKeyId: env.SES_ACCESS_KEY_ID, secretAccessKey: env.SES_SECRET_ACCESS_KEY },
+        configurationSet: env.SES_CONFIGURATION_SET,
+      });
+    } catch (e) {
+      console.error('ses postman config error, broadcasting disabled', e instanceof Error ? e.message : 'unknown');
+      return null;
+    }
   }
   if (env.NEWSLETTER_POSTMAN) console.error('unknown NEWSLETTER_POSTMAN, broadcasting disabled');
   return null;

@@ -420,3 +420,35 @@ test('帳本保存天數設很短也不會清掉電子報的帳本列（至少�
   await purgeLedger(w.db, 30, new Date(w.clock.t + 401 * 86_400_000));
   assert.equal(w.count('messages', "stream = 'marketing'"), 0);
 });
+
+test('郵差報了滾動 24 小時已用量（SES GetAccount 的 SentLast24Hours）：今天只寄得到剩下的', async () => {
+  const w = await makeWorld({ members: 100, config: { paceMinutes: 1 }, postman: { limits: { perSecond: 1, perDay: 200, sentLast24h: 170 } } });
+  await w.campaign('roll-1');
+  await w.run(5);
+  assert.equal(w.postman.accepted.length, 30);
+  const row = await w.db.prepare('SELECT sent, "limit", provider_per_day, paused, reason FROM throttle_days WHERE domain = ?').bind(DOMAIN).first<Record<string, unknown>>();
+  assert.deepEqual({ ...row }, { sent: 30, limit: 30, provider_per_day: 200, paused: 1, reason: 'daily_limit' });
+});
+
+test('郵差說今天額度用完（daily_quota）：今天停放水、這期不暫停，隔天照常寄完', async () => {
+  const w = await makeWorld({ members: 20, config: { paceMinutes: 1 }, postman: { limits: { perSecond: 5, perDay: 200 }, rules: [{ match: /r1[0-9]@/, outcome: 'daily_quota', times: 1 }] } });
+  await w.campaign('dq-1');
+  await w.run(5);
+  assert.equal((await w.status('dq-1')).status, 'sending');
+  const row = await w.db.prepare('SELECT paused, reason FROM throttle_days WHERE domain = ?').bind(DOMAIN).first<Record<string, unknown>>();
+  assert.deepEqual({ ...row }, { paused: 1, reason: 'daily_limit' });
+  w.clock.t += 24 * 3600_000;
+  await w.run(10, { until: async () => (await w.status('dq-1')).status === 'done' });
+  assert.equal((await w.status('dq-1')).status, 'done');
+  assert.equal(w.maxPerAddress(), 1);
+});
+
+test('連續 5 位都被永久拒收（中間沒寄成功）→ 暫停本期（多半是設定問題）', async () => {
+  const w = await makeWorld({ members: 30, config: { paceMinutes: 1 }, postman: { limits: { perSecond: 5, perDay: 200 }, rules: [{ match: /@example\.com$/, outcome: 'permanent' }] } });
+  await w.campaign('ps-1');
+  await w.run(3);
+  const st = await w.status('ps-1');
+  assert.equal(st.status, 'paused');
+  assert.match(st.pause_reason ?? '', /permanent_streak/);
+  assert.ok(w.postman.calls.length < 30, `calls ${w.postman.calls.length}`);
+});

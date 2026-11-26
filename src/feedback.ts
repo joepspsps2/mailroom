@@ -22,7 +22,8 @@ export type FeedbackEvent =
       /**
        * 為什麼暫時退信。只有 'mailbox'（信箱層級：信箱滿了、收信伺服器暫時掛了、對方限速）才累計；
        * 'content'（內容被拒、附件被拒、信太大）跟信箱無關，不累計，免得把正常讀者誤判成硬退信。沒給＝不累計。
-       * SES 對照：Transient 的 General、MailboxFull → mailbox；ContentRejected、AttachmentRejected、MessageTooLarge → content。
+       * SES 對照（ses-events.ts）：Transient 的 MailboxFull → mailbox；ContentRejected、AttachmentRejected、MessageTooLarge → content；
+       * Transient 的 General、CustomTimeoutExceeded 與 Undetermined 都不帶（原因不明，寧可不累計也不要誤判成硬退信）。
        */
       cause?: TransientCause;
       source: string;

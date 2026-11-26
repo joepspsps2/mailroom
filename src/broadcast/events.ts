@@ -52,7 +52,14 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
       contact ??= Number(r.contact_id);
     }
   }
-  const email = (msg?.to_email ?? (typeof ev.email === 'string' ? ev.email : '')).trim().toLowerCase();
+  // 事件自己有說是哪個地址、卻跟帳本列的收件人不同 → 那一列不是這則事件的（不能把別人的退信算到這位讀者頭上）。
+  const evEmail = typeof ev.email === 'string' ? ev.email.trim().toLowerCase() : '';
+  if (msg && evEmail && msg.to_email.trim().toLowerCase() !== evEmail) {
+    msg = null;
+    campaign = null;
+    contact = null;
+  }
+  const email = (msg?.to_email ?? evEmail).trim().toLowerCase();
   const subtype = typeof ev.subtype === 'string' ? ev.subtype.slice(0, 64) : null;
 
   // 1. 帳本列的最後狀態（送達之後的開信、點擊不覆蓋）。
@@ -60,12 +67,18 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
   if (last && msg) await db.prepare('UPDATE messages SET last_event = ?, updated_at = ? WHERE id = ?').bind(last, now.toISOString(), msg.id).run();
 
   // 2. 退信／檢舉／送達的後續處理（進拒收名單等）。
-  if (email && (ev.type === 'bounce' || ev.type === 'complaint' || ev.type === 'delivery')) {
+  if (email && !ev.skipFeedback && (ev.type === 'bounce' || ev.type === 'complaint' || ev.type === 'delivery')) {
     const source = `${ev.provider}-event`;
     const detail = ev.detail && typeof ev.detail === 'object' ? JSON.stringify(ev.detail).slice(0, 300) : null;
     const fb: FeedbackInput =
       ev.type === 'bounce'
-        ? { type: 'bounce', kind: isPermanentBounce(subtype) ? 'permanent' : 'transient', email, campaign, source, detail: [subtype, detail].filter(Boolean).join(' ') || null }
+        ? isPermanentBounce(subtype)
+          ? { type: 'bounce', kind: 'permanent', email, source, detail: [subtype, detail].filter(Boolean).join(' ') || null }
+          : {
+              type: 'bounce', kind: 'transient', email, campaign, source, detail: [subtype, detail].filter(Boolean).join(' ') || null,
+              // 只有郵差層明說是信箱層級（mailbox）或內容（content）才帶；其他（一般性、無法判定）不帶＝不累計。
+              ...(ev.cause === 'mailbox' || ev.cause === 'content' ? { cause: ev.cause } : {}),
+            }
         : ev.type === 'complaint'
           ? { type: 'complaint', email, source, detail }
           : { type: 'delivery', email };

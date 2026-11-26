@@ -4,8 +4,11 @@
 // 引擎不做自動切換（一個郵差出事多半是名單或內容的問題，自動換只會把問題帶到第二個帳號）。
 //
 // 送一封的結果一定要分清楚「確定沒寄出」與「不知道」：
-// - temporary／permanent／throttled／account_paused＝郵差明確說沒收下（引擎可以安全地再試或停下）。
+// - temporary／permanent／throttled／daily_quota／account_paused＝郵差明確說沒收下（引擎可以安全地再試或停下）。
+//   daily_quota＝郵差的 24 小時額度用完：今天停放水、明天自動恢復（不踩紅燈煞車）。
 // - 丟例外＝不知道有沒有寄出 → 引擎把那一位記成 uncertain、絕不自動重寄（寧可漏一封也不寄兩封）。
+
+import type { TransientCause } from '../feedback.ts';
 
 export type EventType = 'send' | 'delivery' | 'bounce' | 'complaint' | 'reject' | 'delay' | 'open' | 'click' | 'unsubscribe';
 export const EVENT_TYPES: readonly EventType[] = ['send', 'delivery', 'bounce', 'complaint', 'reject', 'delay', 'open', 'click', 'unsubscribe'];
@@ -26,7 +29,7 @@ export interface PostmanMail {
 
 export type PostmanOutcome =
   | { ok: true; providerId: string }
-  | { ok: false; kind: 'temporary' | 'permanent' | 'throttled' | 'account_paused'; error: string };
+  | { ok: false; kind: 'temporary' | 'permanent' | 'throttled' | 'daily_quota' | 'account_paused'; error: string };
 
 export interface PostmanLimits {
   /** 每秒最多幾封。 */
@@ -37,6 +40,8 @@ export interface PostmanLimits {
   sentLast24h?: number;
   /** 帳號健康狀態；不是 HEALTHY 就踩煞車。 */
   enforcement: string;
+  /** 帳號是否已離開沙盒（有的郵差才報）。 */
+  production?: boolean;
 }
 
 export interface Postman {
@@ -55,6 +60,16 @@ export interface ProviderEvent {
   type: EventType;
   /** bounce 用：Permanent／Transient／Undetermined。 */
   subtype?: string | null;
+  /**
+   * 暫時退信的原因（交給 applyFeedback 決定要不要累計）：只有 'mailbox'（信箱滿）會累計成「連續暫時退信」；
+   * 'content'（內容／附件被拒、信太大）不累計；沒給＝不累計（一般性、無法判定的暫時退信都屬這類）。
+   */
+  cause?: TransientCause | null;
+  /**
+   * true＝只記事件、不交給 applyFeedback（不進拒收、不退訂）。例：SES 因為收件人已在 SES 自己的帳號層級拒收名單
+   *（OnAccountSuppressionList）而根本沒寄——那是舊紀錄的回音，不是新的退信或檢舉。
+   */
+  skipFeedback?: boolean;
   at: string;
   email?: string | null;
   campaign?: string | null;
@@ -74,6 +89,7 @@ export type FakeOutcome =
   | 'temporary' // 郵差回暫時失敗（沒收下）
   | 'permanent' // 郵差回永久失敗（沒收下）
   | 'throttle' // 郵差回限流（沒收下）
+  | 'daily_quota' // 郵差說今天 24 小時額度用完（沒收下）
   | 'account_paused' // 郵差說帳號被停（沒收下）
   | 'crash'; // 郵差丟例外（不知道有沒有寄出）
 
@@ -170,6 +186,8 @@ export class FakePostman implements Postman {
         return { ok: false, kind: 'permanent', error: 'fake permanent failure' };
       case 'throttle':
         return { ok: false, kind: 'throttled', error: 'fake throttling' };
+      case 'daily_quota':
+        return { ok: false, kind: 'daily_quota', error: 'fake daily quota exceeded' };
       case 'account_paused':
         return { ok: false, kind: 'account_paused', error: 'fake account paused' };
       case 'crash':
@@ -178,7 +196,7 @@ export class FakePostman implements Postman {
     this.accepted.push(mail);
     const providerId = `${this.name}-${++this.seq}-${mail.tags.campaign}-${mail.tags.contact}`;
     const at = (this.opts.now ?? (() => new Date()))();
-    const emit = async (type: EventType, subtype: string | null = null, detail: Record<string, unknown> | null = null) => {
+    const emit = async (type: EventType, subtype: string | null = null, detail: Record<string, unknown> | null = null, cause?: TransientCause) => {
       if (!this.opts.emit) return;
       const delay = this.opts.delays?.[type] ?? DEFAULT_DELAYS[type];
       await this.opts.emit(
@@ -193,13 +211,14 @@ export class FakePostman implements Postman {
           campaign: mail.tags.campaign,
           contact: mail.tags.contact,
           detail,
+          ...(cause ? { cause } : {}),
         },
         delay,
       );
     };
     await emit('send');
     if (outcome === 'hard_bounce' || outcome === 'suppressed') await emit('bounce', 'Permanent', { bounceSubType: outcome === 'suppressed' ? 'OnAccountSuppressionList' : 'General' });
-    else if (outcome === 'soft_bounce') await emit('bounce', 'Transient');
+    else if (outcome === 'soft_bounce') await emit('bounce', 'Transient', { bounceSubType: 'MailboxFull' }, 'mailbox');
     else {
       if (outcome === 'delay') await emit('delay');
       await emit('delivery');

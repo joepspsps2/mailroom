@@ -226,3 +226,14 @@ test('郵差回報的退訂事件：退掉那一期所屬的名單', async () =>
   const m = await w.db.prepare("SELECT m.status FROM list_members m JOIN contacts c ON c.id = m.contact_id WHERE c.email = 'r1@example.com'").first<{ status: string }>();
   assert.equal(m?.status, 'unsubscribed');
 });
+
+test('群發路線的暫時退信：郵差標了信箱層級（mailbox）才累計，連續 3 期升級成硬退信；沒標的不累計', async () => {
+  const { listDb } = await import('./lists-helpers.ts');
+  const { suppressedReason } = await import('../src/core.ts');
+  const db = listDb();
+  const base = { provider: 'fake', type: 'bounce' as const, subtype: 'Transient', at: '2027-03-01T00:00:00Z' };
+  for (const c of ['w-1', 'w-2', 'w-3']) await ingestEvent(db, { ...base, providerEventId: `plain-${c}`, email: 'p@example.com', campaign: c });
+  assert.equal(await suppressedReason(db, 'p@example.com', 'marketing'), null);
+  for (const c of ['w-1', 'w-2', 'w-3']) await ingestEvent(db, { ...base, providerEventId: `box-${c}`, email: 'm@example.com', campaign: c, cause: 'mailbox' });
+  assert.equal(await suppressedReason(db, 'm@example.com', 'transactional'), 'hard_bounce');
+});

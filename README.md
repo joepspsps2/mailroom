@@ -26,8 +26,9 @@ runs a pre-send check that refuses to schedule a broken issue. It does not send 
 
 The `@joelincc/mailroom/broadcast` entry point sends one newsletter issue to a frozen list: approval and pre-send check
 before scheduling, waves, pacing under the provider's limits and your own daily cap, a warm-up ladder, automatic brakes
-on bounces and complaints, and a reconciliation that must add up before an issue counts as done. The only built-in
-newsletter postman is a fake one for development. See [docs/broadcast.md](docs/broadcast.md).
+on bounces and complaints, and a reconciliation that must add up before an issue counts as done. Newsletter
+postmans: Amazon SES with signed SNS events ([docs/ses.md](docs/ses.md)) and a fake one for development. See
+[docs/broadcast.md](docs/broadcast.md).
 
 ## How it works
 
@@ -52,7 +53,7 @@ The `from` address must belong to the tier's domain.
 
 ## Supported providers
 
-mailroom supports exactly **three** providers: **Resend**, **SMTP2GO** and **Cloudflare Email Sending**. `ROUTES` only accepts those three names (`resend`, `smtp2go`, `cloudflare`); anything else is ignored. If you want another provider (SES, Postmark, Mailgun, a plain SMTP relay…), you have to write an adapter yourself in `src/transport.ts` and add its name to `MAIL_ROUTES` — there is no plugin interface, and no support for doing so.
+For transactional mail, mailroom supports exactly **three** providers: **Resend**, **SMTP2GO** and **Cloudflare Email Sending** (newsletters can use Amazon SES, see [docs/ses.md](docs/ses.md)). `ROUTES` only accepts those three names (`resend`, `smtp2go`, `cloudflare`); anything else is ignored. If you want another provider (SES, Postmark, Mailgun, a plain SMTP relay…), you have to write an adapter yourself in `src/transport.ts` and add its name to `MAIL_ROUTES` — there is no plugin interface, and no support for doing so.
 
 ## Verify your sender domain first
 
