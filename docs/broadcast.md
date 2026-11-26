@@ -108,6 +108,10 @@ once. Open rate = people with an open event ÷ (sent − hard bounces).
 ## Status
 
 - `GET /v1/campaigns/{id}` — state, approval, pre-send check, recipients by state/reason/wave, rates (no content, no addresses).
+- `GET /v1/campaigns/{id}/audience` — who would receive it if it started now: per wave and segment, and how many are skipped (suppressed, not in this warm-up step). Read-only.
+- `GET /v1/campaigns/{id}/preview` — the issue filled in for a sample reader (and a reader without a name), the pre-send check detail. `POST` does the same and marks this exact content as previewed; **approval over HTTP is refused (`preview_required`) until it has been**, and any edit invalidates it.
+- `POST /v1/campaigns/{id}/test { to: [...], subjectPrefix? }` — real postman, real headers, one mail per address, **only to addresses listed in `TEST_RECIPIENTS`** (at most 10 per call), subject prefixed. Not in the frozen list, not in the ledger, not counted anywhere. Refused while the domain is on hold. A postman error that leaves the outcome unknown is reported as `unknown_outcome` and never retried.
+- The status answer includes `pauseExplain` for a paused issue: the code, a one-line summary, the numerator and denominator at the time, the threshold, whether the domain hold must be released first, whether a plain resume makes sense, and the suggested next step.
 - `GET /v1/throttle` — today's cap and usage, provider speed and health, domain hold, issues in flight.
 
 ## Postmen
@@ -179,6 +183,9 @@ without an unsubscribe link. Headers produced by a custom `render` are checked a
 | `waveGapMinutes` / `waveGateWaitMinutes` / `waveGateBounceRate` | 60 / 30 / 0.02 | wave timing and gate |
 | `brakeMinSent` / `brakeHardBounceRate` / `brakeComplaintCount` / `brakeComplaintRate` | 200 / 0.04 / 3 / 0.001 | issue brake |
 | `domainWindowDays` / `domainMinSent` / `domainBounceRate` / `domainComplaintRate` | 30 / 200 / 0.04 / 0.0008 | domain stop |
+| `domainMinComplaints` | 1 | complaints in the window needed (besides the rate) to stop the domain. 1 = no extra floor: with a small sample a single complaint can cross 0.08% (1 of 220 is 0.45%). Decide before the first real send whether to raise it |
+| `waveGateMinSent` | 1 | mails the previous wave must have sent before its bounce rate is judged. With 30-person waves one bounce is 3.3%, over the 2% gate |
+| `startGraceMinutes` | 360 | a scheduled issue more than this many minutes past its time (provider unhealthy, domain on hold, Worker down) goes back to `approved` with a yellow alert `start_stale` instead of starting late; schedule it again after checking |
 | `stuckMinutes` / `stallMinutes` | 10 / 30 | re-release / queue-stalled brake |
 | `maxAttempts` / `throttleRetrySeconds` | 3 / 30 | temporary failures / throttling |
 | `utcOffsetHours` | 8 | which local day the daily cap uses |

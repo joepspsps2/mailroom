@@ -19,12 +19,12 @@ import { listMembers, listStatus, listSubscribe, listUnsubscribe, type Subscribe
 import { bearer, json, notFound, sameToken } from './http.ts';
 import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
 import { handleUnsubRequest, unsubscribeLinksForEmail, unsubSecrets, type UnsubLinks } from './unsub.ts';
-import { handleEmailMessage, unsubConfig } from './unsub-wiring.ts';
+import { flushUnsubAlerts, handleEmailMessage, unsubConfig } from './unsub-wiring.ts';
 import { warnIfNoAlert } from './alert.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
 import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
-import { broadcastQueue, broadcastTick, isBroadcastBatch, type BroadcastEnv } from './broadcast/worker.ts';
+import { broadcastQueue, broadcastTick, isBroadcastBatch, testSendDeps, type BroadcastEnv } from './broadcast/worker.ts';
 
 export interface Env extends BroadcastEnv {
   DB: D1Database;
@@ -283,7 +283,7 @@ export default {
         if (size) return json({ ok: false, reason: size === 'missing' ? 'length_required' : 'too_large' }, size === 'missing' ? 411 : 413);
       }
       const config = { ...(jsonVar<Record<string, unknown>>(env.BROADCAST_CONFIG) ?? {}), ...(env.NEWSLETTER_MAX_PER_DAY !== undefined ? { maxPerDay: env.NEWSLETTER_MAX_PER_DAY } : {}) };
-      return (await handleBroadcastRequest(request, url, { db: env.DB, domain: env.MARKETING_DOMAIN.toLowerCase(), config: config as never })) ?? notFound();
+      return (await handleBroadcastRequest(request, url, { db: env.DB, domain: env.MARKETING_DOMAIN.toLowerCase(), config: config as never, test: testSendDeps(env) })) ?? notFound();
     }
 
     const postPaths = ['/v1/drill', '/v1/unsuppress'];
@@ -340,6 +340,7 @@ export default {
     // 群發先跑（煞車不能被後面的雜事拖累）：每分鐘放水、踩煞車、寄完對帳；沒設定群發就什麼都不做。
     await broadcastTick(env).catch((e) => console.error('broadcast tick failed', e instanceof Error ? e.message : 'unknown'));
     warnIfNoAlert(env.UNSUB_ALERT_WEBHOOK);
+    await flushUnsubAlerts(env).catch((e) => console.error('unsub alert flush failed', e instanceof Error ? e.message : 'unknown'));
     const out = await dailyDrill(env);
     if (out.length) console.log('daily drill', out.join(','));
     const days = retentionDays(env.LEDGER_RETENTION_DAYS);

@@ -8,14 +8,19 @@
     "type": "git",
     "url": "git+https://github.com/joepspsps2/mailroom.git"
   },
+  "bin": {
+    "mailroom": "./bin/mailroom.mjs"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./compose": "./src/compose/index.ts",
     "./unsub": "./src/unsub.ts",
     "./feedback": "./src/feedback.ts",
-    "./broadcast": "./src/broadcast/index.ts"
+    "./broadcast": "./src/broadcast/index.ts",
+    "./cli": "./src/cli/main.ts"
   },
   "files": [
+    "bin",
     "src",
     "migrations",
     "wrangler.example.jsonc",

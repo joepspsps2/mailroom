@@ -1,0 +1,194 @@
+// 電子報櫃台指令對引擎的改動：可設定下限、過期不自動開寄、防重複建期、暫停原因說明、預覽與測試信、退訂告警額度。
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DOMAIN, makeWorld } from './broadcast-helpers.ts';
+import { activeHold, approveCampaign, campaignStatus, explainPause, recordPreflight, resolveConfig, saveDraft, type BroadcastConfig } from '../src/broadcast/index.ts';
+import { handleBroadcastRequest } from '../src/broadcast/routes.ts';
+import { FakePostman } from '../src/broadcast/postman.ts';
+import { parseAllowed } from '../src/broadcast/test-send.ts';
+import { flushSuppressedAlerts, resetAlertWarning, sendAlert } from '../src/alert.ts';
+
+const ADD = (over: Record<string, unknown> = {}) => ({ list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: '<p>Hi {{name}} <a href="{{unsubscribe_url}}">u</a> {{web_url}}</p>', text: 'Hi {{unsubscribe_url}} {{web_url}}', headers: { 'List-Unsubscribe': '<{{unsubscribe_url}}>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }, audience: { waves: [['*']] }, ...over });
+
+test('設定：新的下限預設不改變原規則，寫錯的值用預設', () => {
+  const c = resolveConfig({});
+  assert.deepEqual([c.domainMinComplaints, c.waveGateMinSent, c.startGraceMinutes], [1, 1, 360]);
+  assert.equal(resolveConfig({ domainMinComplaints: 0, waveGateMinSent: -3, startGraceMinutes: 'x' as never }).domainMinComplaints, 1);
+  assert.equal(resolveConfig({ domainMinComplaints: 3 }).domainMinComplaints, 3);
+});
+
+test('① 寄件網域檢舉：domainMinComplaints 調高後，2 件過線的比率不再整個網域停', async () => {
+  const mk = (cfg: Partial<BroadcastConfig>) => makeWorld({ members: 2500, emailOf: (i) => (i === 500 || i === 1500 ? `complaint+${i}@example.com` : `r${i}@example.com`), config: { paceMinutes: 2, brakeComplaintCount: 99, ...cfg }, postman: { limits: { perSecond: 100, perDay: 100_000 } } });
+  const strict = await mk({ domainMinComplaints: 3 });
+  await strict.campaign('m-1');
+  await strict.run(120, { until: async () => !!(await activeHold(strict.db, DOMAIN)) || (await strict.status('m-1')).status === 'done' });
+  assert.equal(await activeHold(strict.db, DOMAIN), null, '2 complaints < 3');
+  assert.equal((await strict.status('m-1')).status, 'done');
+  const dflt = await mk({});
+  await dflt.campaign('m-2');
+  await dflt.run(120, { until: async () => !!(await activeHold(dflt.db, DOMAIN)) || (await dflt.status('m-2')).status === 'done' });
+  assert.ok(await activeHold(dflt.db, DOMAIN), '預設照原規則：有 1 件且比率過線就停');
+});
+
+test('② 分波閘門樣本下限：waveGateMinSent 高於上一波寄出數 → 不判斷、不暫停', async () => {
+  const mk = (cfg: Partial<BroadcastConfig>) => makeWorld({ members: 60, segmentOf: (i) => (i < 30 ? 'core' : 'steady'), emailOf: (i) => (i === 3 ? 'bounce+3@example.com' : `r${i}@example.com`), config: { paceMinutes: 2, waveGapMinutes: 1, waveGateWaitMinutes: 1, brakeHardBounceRate: 1, domainBounceRate: 1, ...cfg } });
+  const loose = await mk({ waveGateMinSent: 50 });
+  await loose.campaign('g-1', { waves: [['core'], ['steady']] });
+  await loose.run(60, { until: async () => (await loose.status('g-1')).status !== 'sending' });
+  assert.equal((await loose.status('g-1')).status, 'done', '30 sent < 50: gate does not judge');
+  const strict = await mk({});
+  await strict.campaign('g-2', { waves: [['core'], ['steady']] });
+  await strict.run(60, { until: async () => (await strict.status('g-2')).status !== 'sending' });
+  assert.match((await strict.status('g-2')).pause_reason ?? '', /^brake:wave_gate:wave1:1\/30/, '預設：1 封退信（3.3%）就停');
+});
+
+test('③ 郵差不健康很久之後恢復：過了原定時間超過 startGraceMinutes → 退回已核准、不自動開寄；寬限內照常開寄', async () => {
+  const w = await makeWorld({ members: 20, config: { paceMinutes: 1, limitsRefreshMinutes: 1, startGraceMinutes: 120 }, postman: { limits: { enforcement: 'PROBATION' } } });
+  await w.campaign('st-1');
+  await w.run(3);
+  assert.equal((await w.status('st-1')).status, 'scheduled');
+  w.postman.setLimits({ enforcement: 'HEALTHY' });
+  w.clock.t += 3 * 3_600_000; // 過了 3 小時才恢復
+  await w.run(5);
+  assert.equal((await w.status('st-1')).status, 'approved');
+  assert.equal(w.postman.accepted.length, 0, '一封都沒寄');
+  assert.ok(w.alerts.some((a) => a.startsWith('yellow:start_stale:st-1')));
+  // 寬限內：晚 30 分鐘恢復照常開寄
+  const ok = await makeWorld({ members: 20, config: { paceMinutes: 1, limitsRefreshMinutes: 1, startGraceMinutes: 120 }, postman: { limits: { enforcement: 'PROBATION' } } });
+  await ok.campaign('st-2');
+  await ok.run(3);
+  ok.postman.setLimits({ enforcement: 'HEALTHY' });
+  ok.clock.t += 30 * 60_000;
+  await ok.run(40, { until: async () => (await ok.status('st-2')).status === 'done' });
+  assert.equal((await ok.status('st-2')).status, 'done');
+});
+
+test('④ 同一份內容不能用不同期號建兩次（網頁版網址／原稿位置／整份內容）；取消掉的不算', async () => {
+  const w = await makeWorld({ members: 1 });
+  const opts = { marketingDomain: DOMAIN, now: w.now };
+  assert.equal((await saveDraft(w.db, { id: 'a-1', ...ADD({ webUrl: 'https://www.example.com/p/1', sourceRef: 'posts/a.md@abc' }) }, opts)).ok, true);
+  assert.deepEqual(await saveDraft(w.db, { id: 'a-2', ...ADD({ subject: 'other', webUrl: 'https://www.example.com/p/1' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1' });
+  assert.deepEqual(await saveDraft(w.db, { id: 'a-3', ...ADD({ subject: 'other', webUrl: 'https://www.example.com/p/3', sourceRef: 'posts/a.md@abc' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1' });
+  assert.deepEqual(await saveDraft(w.db, { id: 'a-4', ...ADD({ webUrl: 'https://www.example.com/p/4' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1' }, 'same body, different url');
+  // 自己改自己不算重複
+  assert.equal((await saveDraft(w.db, { id: 'a-1', ...ADD({ subject: 'edited', webUrl: 'https://www.example.com/p/1', sourceRef: 'posts/a.md@abc' }) }, opts)).ok, true);
+  // 取消後同一份內容可以再建
+  await w.db.prepare("UPDATE campaigns SET status = 'cancelled' WHERE id = 'a-1'").run();
+  assert.equal((await saveDraft(w.db, { id: 'a-5', ...ADD({ webUrl: 'https://www.example.com/p/1' }) }, opts)).ok, true);
+});
+
+test('① 看原因：暫停原因翻成門檻、分子分母與建議；網域停寄要先解除', () => {
+  const cfg = resolveConfig({});
+  const hb = explainPause('brake:hard_bounce_rate:9/220', cfg)!;
+  assert.deepEqual([hb.code, hb.numerator, hb.denominator, hb.needsDomainRelease, hb.resumable], ['hard_bounce_rate', 9, 220, false, true]);
+  assert.equal(hb.threshold?.hardBounceRate, 0.04);
+  const dh = explainPause('brake:domain_hold:complaint_rate:1/220', cfg)!;
+  assert.deepEqual([dh.code, dh.needsDomainRelease, dh.threshold?.minComplaints], ['domain_hold', true, 1]);
+  assert.match(dh.suggestion, /single complaint/);
+  assert.equal(explainPause('brake:wave_gate:wave1:1/30', cfg)!.denominator, 30);
+  assert.equal(explainPause('render_error:x', cfg)!.resumable, false);
+  assert.equal(explainPause('reconcile_mismatch:a', cfg)!.resumable, false);
+  assert.equal(explainPause('manual: checking', cfg)!.resumable, true);
+  assert.equal(explainPause(null, cfg), null);
+});
+
+// ── 路由：預覽、測試信、核准前要有預覽 ────────────────────────────────────────
+
+async function routeWorld() {
+  const w = await makeWorld({ members: 3 });
+  const postman = new FakePostman({ now: w.now });
+  const deps = { db: w.db, domain: DOMAIN, now: w.now, test: { postman, render: async (c: any) => ({ html: c.html, text: c.text, headers: { 'List-Unsubscribe': '<https://example.com/u>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } }), allowed: parseAllowed('QA1@example.com, qa2@example.com') } };
+  const call = async (method: string, path: string, body?: unknown) => {
+    const r = await handleBroadcastRequest(new Request(`https://x.example.com${path}`, { method, body: body === undefined ? undefined : JSON.stringify(body) }), new URL(`https://x.example.com${path}`), deps);
+    return { status: r!.status, body: (await r!.json()) as Record<string, any> };
+  };
+  const opts = { marketingDomain: DOMAIN, now: w.now };
+  await saveDraft(w.db, { id: 'p-1', ...ADD({ webUrl: 'https://www.example.com/p/1' }) }, opts);
+  await recordPreflight(w.db, 'p-1', { ok: true, issues: [{ severity: 'info', code: 'x', message: 'fine' }] }, w.now);
+  return { w, call, postman };
+}
+
+test('預覽：GET 唯讀（不記號）、POST 記號；內容只有範例收件人；核准前一定要有預覽，內容改了要重來', async () => {
+  const { w, call } = await routeWorld();
+  const noPreview = await call('POST', '/v1/campaigns/p-1/approve', { note: 'ok' });
+  assert.deepEqual([noPreview.status, noPreview.body.reason], [409, 'preview_required']);
+  const get = await call('GET', '/v1/campaigns/p-1/preview');
+  assert.equal(get.status, 200);
+  assert.match(get.body.html, /Sample Reader/);
+  assert.match(get.body.htmlNoName, /<p>Hi\s/);
+  assert.doesNotMatch(JSON.stringify(get.body), /\{\{/);
+  assert.equal(get.body.preflight.issues[0].code, 'x');
+  assert.equal((await call('POST', '/v1/campaigns/p-1/approve', { note: 'ok' })).body.reason, 'preview_required', 'GET 不算預覽');
+  assert.equal((await call('POST', '/v1/campaigns/p-1/preview', {})).body.previewed, true);
+  assert.equal((await campaignStatus(w.db, 'p-1'))!.previewed, true);
+  // 內容改了：預覽失效
+  await saveDraft(w.db, { id: 'p-1', ...ADD({ subject: 'S2', webUrl: 'https://www.example.com/p/1' }) }, { marketingDomain: DOMAIN, now: w.now });
+  assert.equal((await call('POST', '/v1/campaigns/p-1/approve', { note: 'ok' })).body.reason, 'preview_required');
+  await recordPreflight(w.db, 'p-1', { ok: true, issues: [] }, w.now);
+  await call('POST', '/v1/campaigns/p-1/preview', {});
+  assert.equal((await call('POST', '/v1/campaigns/p-1/approve', { note: 'ok' })).status, 200);
+  assert.equal((await call('GET', '/v1/campaigns/nope/preview')).status, 404);
+});
+
+test('測試信：只寄白名單信箱、主旨加前綴、不進名單與統計；沒設白名單或網域停寄就拒絕', async () => {
+  const { w, call, postman } = await routeWorld();
+  const bad = await call('POST', '/v1/campaigns/p-1/test', { to: ['stranger@example.com'] });
+  assert.deepEqual([bad.status, bad.body.reason], [403, 'recipient_not_allowed']);
+  assert.equal(postman.accepted.length, 0);
+  assert.equal((await call('POST', '/v1/campaigns/p-1/test', { to: [] })).body.reason, 'bad_recipients');
+  assert.equal((await call('POST', '/v1/campaigns/p-1/test', { to: ['qa1@example.com'], subjectPrefix: 'x\ny' })).body.reason, 'bad_prefix');
+  const ok = await call('POST', '/v1/campaigns/p-1/test', { to: ['qa1@example.com', 'QA2@example.com'], subjectPrefix: '[T] ' });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body.results.map((r: any) => r.ok), [true, true]);
+  assert.equal(postman.accepted.length, 2);
+  assert.equal(postman.accepted[0].subject, '[T] S');
+  assert.equal(postman.accepted[0].tags.contact, 'test');
+  assert.ok(postman.accepted[0].headers?.['List-Unsubscribe-Post'], '真標頭');
+  assert.equal(w.count('messages'), 0, '不進帳本');
+  assert.equal(w.count('campaign_recipients'), 0, '不進凍結名單');
+  await w.db.prepare("INSERT INTO domain_holds (domain, reason, created_at) VALUES (?, 'x', ?)").bind(DOMAIN, w.now().toISOString()).run();
+  assert.equal((await call('POST', '/v1/campaigns/p-1/test', { to: ['qa1@example.com'] })).body.reason, 'domain_held');
+  const off = await handleBroadcastRequest(new Request('https://x.example.com/v1/campaigns/p-1/test', { method: 'POST', body: '{"to":["qa1@example.com"]}' }), new URL('https://x.example.com/v1/campaigns/p-1/test'), { db: w.db, domain: DOMAIN });
+  assert.equal((await off!.json() as any).reason, 'test_recipients_not_configured');
+});
+
+test('測試信：郵差丟例外＝不知道有沒有寄出，照實回報、不重寄', async () => {
+  const { w, call } = await routeWorld();
+  const boom = { name: 'boom', send: async () => { throw new Error('socket closed'); }, limits: async () => ({ perSecond: 1, perDay: 10, enforcement: 'HEALTHY' }) };
+  const r = await handleBroadcastRequest(new Request('https://x.example.com/v1/campaigns/p-1/test', { method: 'POST', body: '{"to":["qa1@example.com"]}' }), new URL('https://x.example.com/v1/campaigns/p-1/test'), { db: w.db, domain: DOMAIN, test: { postman: boom, render: w.deps.render, allowed: ['qa1@example.com'] } });
+  const body = (await r!.json()) as any;
+  assert.equal(body.results[0].ok, false);
+  assert.match(body.results[0].error, /^unknown_outcome/);
+  void call;
+});
+
+// ── ⑤ 退訂告警 ─────────────────────────────────────────────────────────────
+
+test('⑤ 退訂告警：額度滿時寫入失敗那種照送；時間窗結束補送一則「壓掉 N 則」', async () => {
+  resetAlertWarning();
+  const sent: Record<string, any>[] = [];
+  const fetch = (async (_u: string, init: { body: string }) => { sent.push(JSON.parse(init.body)); return { ok: true, status: 200 }; }) as never;
+  const cfg = { url: 'https://alerts.example.com/h', fetch };
+  let t = Date.parse('2027-03-01T01:00:00Z');
+  const now = () => new Date(t);
+  for (let i = 0; i < 25; i++) await sendAlert(cfg, { event: 'unsub_token_invalid', via: 'page', token: `tok${i}` }, now);
+  assert.equal(sent.length, 20, '網頁類每分鐘 20 則');
+  assert.equal(await sendAlert(cfg, { event: 'unsub_write_failed', via: 'page', token: 'important' }, now), true, '寫入失敗不受額度限制');
+  assert.equal(sent.length, 21);
+  assert.equal(await flushSuppressedAlerts(cfg, now), 0, '時間窗還沒結束，不彙總');
+  t += 61_000;
+  assert.equal(await flushSuppressedAlerts(cfg, now), 1);
+  const summary = sent[sent.length - 1];
+  assert.equal(summary.event, 'unsub_alerts_suppressed');
+  assert.equal(summary.suppressed, 5);
+  assert.equal(await flushSuppressedAlerts(cfg, now), 0, '只補送一次');
+  // 沒有後續告警時靠排程呼叫；有後續告警進來時它自己也會先補送
+  resetAlertWarning();
+  sent.length = 0;
+  for (let i = 0; i < 22; i++) await sendAlert(cfg, { event: 'unsub_token_invalid', via: 'page' }, now);
+  t += 61_000;
+  await sendAlert(cfg, { event: 'unsub_token_invalid', via: 'page' }, now);
+  assert.ok(sent.some((s) => s.event === 'unsub_alerts_suppressed' && s.suppressed === 2));
+});
+
+void approveCampaign;

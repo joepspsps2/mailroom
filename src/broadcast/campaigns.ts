@@ -54,7 +54,7 @@ export interface CampaignRow {
   finished_at: string | null; pause_reason: string | null; counts: string | null; created_at: string; updated_at: string;
 }
 
-export type Fail = { ok: false; reason: string; status?: CampaignStatus };
+export type Fail = { ok: false; reason: string; status?: CampaignStatus; twin?: string };
 export type Ok<T = object> = { ok: true } & T;
 
 export const CAMPAIGN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -144,6 +144,12 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   const headers = input.headers ? JSON.stringify(input.headers) : null;
   const t = nowIso(opts.now);
   const existing = await getCampaign(db, input.id);
+  // 同一份內容不能用不同期號建兩次（會寄兩封）：網頁版網址、原稿位置、同名單同內文任一相同，且對方沒被取消，就擋。
+  const twin = await db
+    .prepare("SELECT id FROM campaigns WHERE id <> ? AND status <> 'cancelled' AND ((list_id = ? AND html = ? AND text = ?) OR (? IS NOT NULL AND web_url = ?) OR (? IS NOT NULL AND source_ref = ?)) LIMIT 1")
+    .bind(input.id, input.list, input.html, input.text, input.webUrl ?? null, input.webUrl ?? null, input.sourceRef ?? null, input.sourceRef ?? null)
+    .first<{ id: string }>();
+  if (twin) return { ok: false, reason: 'duplicate_content', twin: twin.id };
   if (!existing) {
     const r = await db
       .prepare(
@@ -186,7 +192,11 @@ export async function recordPreflight(db: Db, id: string, result: PreflightRecor
   const errors = Array.isArray(result.issues) ? result.issues.filter((i) => i && i.severity === 'error').slice(0, 50).map((i) => String(i.code ?? i.message ?? 'error').slice(0, 100)) : [];
   // 回報 ok 但列了 error＝自相矛盾，當沒過。
   const ok = result.ok && errors.length === 0;
-  const record = JSON.stringify({ ok, hash: c.content_hash, at: nowIso(now), errors });
+  // 給預覽頁看的明細（只留嚴重度、代碼、說明，截長；不放收件人資料）。
+  const issues = Array.isArray(result.issues)
+    ? result.issues.filter((i) => i && typeof i === 'object').slice(0, 50).map((i) => ({ severity: String(i.severity ?? '').slice(0, 10), code: String(i.code ?? '').slice(0, 60), message: String(i.message ?? '').slice(0, 300) }))
+    : [];
+  const record = JSON.stringify({ ok, hash: c.content_hash, at: nowIso(now), errors, issues });
   const r = await db.prepare('UPDATE campaigns SET preflight = ?, updated_at = ? WHERE id = ? AND content_hash = ?').bind(record, nowIso(now), id, c.content_hash).run();
   if ((r.meta.changes ?? 0) !== 1) return { ok: false, reason: 'changed_meanwhile' };
   // 檢查沒過：已排程的退回 approved（不准留在 scheduled）。

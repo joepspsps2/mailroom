@@ -167,6 +167,12 @@ async function startDue(ctx: Ctx, blocked: string | null): Promise<void> {
   const { db } = ctx.deps;
   const due = (await db.prepare("SELECT * FROM campaigns WHERE status = 'scheduled' AND scheduled_at <= ? ORDER BY scheduled_at, id").bind(ctx.iso).all<CampaignRow>()).results;
   for (const c of due) {
+    // 過了原定時間太久（等了很久才輪到開寄）：不自動開寄，退回已核准，由人確認現在寄還適不適合再重排。
+    if (Date.parse(c.scheduled_at ?? '') < ctx.now.getTime() - ctx.cfg.startGraceMinutes * 60_000) {
+      const back = await db.prepare("UPDATE campaigns SET status = 'approved', scheduled_at = NULL, updated_at = ? WHERE id = ? AND status = 'scheduled'").bind(ctx.iso, c.id).run();
+      if ((back.meta.changes ?? 0) === 1) await emitAlert(ctx, { level: 'yellow', code: 'start_stale', campaign: c.id, message: `campaign ${c.id} was due at ${c.scheduled_at} and could not start within ${ctx.cfg.startGraceMinutes} minutes: moved back to approved, schedule it again after checking` });
+      continue;
+    }
     if (blocked) {
       await startBlocked(ctx, c, `start_blocked_${blocked}`, 'yellow', `campaign ${c.id} not started: ${blocked}`);
       continue;
@@ -356,7 +362,7 @@ async function processSending(ctx: Ctx, c: CampaignRow, budget: Budget, throttle
       if (lastDone?.t && lastDone.t > minutesAgo(ctx.now, cfg.waveGateWaitMinutes)) return;
       // 只有「上一次就是被這道閘門停下、人工放行」時才從放行起算（＝放行這一波）；其他情況整波都算。
       const pr = await campaignRates(db, c.id, prev.w, sinceFor('wave_gate'));
-      if (pr.hardBounceRate >= cfg.waveGateBounceRate) {
+      if (pr.sent >= cfg.waveGateMinSent && pr.hardBounceRate >= cfg.waveGateBounceRate) {
         await brake(ctx, c.id, `brake:wave_gate:wave${prev.w}:${pr.hardBounces}/${pr.sent}`);
         return;
       }
@@ -439,7 +445,9 @@ export async function tick(deps: BroadcastDeps): Promise<TickReport> {
     const windowStart = new Date(now.getTime() - cfg.domainWindowDays * 86_400_000).toISOString();
     const since = lastRelease?.t && lastRelease.t > windowStart ? lastRelease.t : windowStart;
     const d = await domainRates(db, cfg.site, since);
-    if (d.sent >= cfg.domainMinSent && (d.hardBounceRate >= cfg.domainBounceRate || d.complaintRate >= cfg.domainComplaintRate)) {
+    // 檢舉另有件數下限（domainMinComplaints，預設 1＝與原本相同）；退信沒有。
+    const complaintTrips = d.complaintRate >= cfg.domainComplaintRate && d.complaints >= cfg.domainMinComplaints;
+    if (d.sent >= cfg.domainMinSent && (d.hardBounceRate >= cfg.domainBounceRate || complaintTrips)) {
       const reason = d.hardBounceRate >= cfg.domainBounceRate ? `bounce_rate:${d.hardBounces}/${d.sent}` : `complaint_rate:${d.complaints}/${d.sent}`;
       await db.prepare('INSERT INTO domain_holds (domain, reason, created_at) VALUES (?, ?, ?)').bind(domain, reason, ctx.iso).run();
       hold = await activeHold(db, domain);
