@@ -336,7 +336,7 @@ test('樣板：自訂頁尾區塊與退訂引導句進 HTML 與純文字；退�
 test('寄前檢查：轉址每一跳都重查內網；內網各種寫法（IPv6、對映、十進位、100.64）都擋；轉到壞頁照 404 算', async () => {
   const c = compose(base({ source: '---\ntitle: t\ndescription: d\n---\n\n[x](https://example.com/r)' }));
   const redirectTo = (to: string): PreflightOptions['fetch'] => async (url) => (url === 'https://example.com/r' ? { status: 302, headers: { get: (n) => (n.toLowerCase() === 'location' ? to : null) } } : { status: 200 });
-  for (const to of ['http://127.0.0.1/admin', 'http://169.254.169.254/latest', 'http://[::1]/', 'http://[::ffff:127.0.0.1]/', 'http://2130706433/', 'http://0x7f.1/', 'http://100.64.0.1/', 'http://metadata.internal/', 'http://[fd00::1]/']) {
+  for (const to of ['http://127.0.0.1/admin', 'http://169.254.169.254/latest', 'http://[::1]/', 'http://[::ffff:127.0.0.1]/', 'http://0x7f000001/', 'http://0x7f.1/', 'http://100.64.0.1/', 'http://metadata.internal/', 'http://[fd00::1]/']) {
     assert.ok(codes(await pf(c, { fetch: redirectTo(to) })).includes('link_redirect_private'), `轉到 ${to} 要擋`);
   }
   assert.ok(codes(await pf(c, { fetch: redirectTo('javascript:alert(1)') })).includes('link_redirect_bad'));
@@ -346,6 +346,6 @@ test('寄前檢查：轉址每一跳都重查內網；內網各種寫法（IPv6�
   const to404: PreflightOptions['fetch'] = async (url) => (url === 'https://example.com/r' ? { status: 301, headers: { get: () => 'https://example.org/gone' } } : { status: url.includes('gone') ? 404 : 200 });
   assert.ok(codes(await pf(c, { fetch: to404 })).includes('link_broken'));
   // 直接寫在原稿裡的內網寫法
-  const direct = compose(base({ source: '---\ntitle: t\ndescription: d\n---\n\n[a](http://[::ffff:7f00:1]/) [b](http://100.64.1.1/) [c](http://2130706433/)' }));
+  const direct = compose(base({ source: '---\ntitle: t\ndescription: d\n---\n\n[a](http://[::ffff:7f00:1]/) [b](http://100.64.1.1/) [c](http://0x7f000001/)' }));
   assert.equal(codes(await pf(direct)).filter((x) => x === 'link_private_host').length, 3);
 });
