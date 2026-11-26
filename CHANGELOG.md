@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Newsletter lists** (see `docs/lists.md`). New D1 migration `0005_lists.sql` (`contacts`, `lists`, `list_members`); internal `listSubscribe` / `listUnsubscribe` / `listStatus` / `listMembers`; admin endpoints `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments`. Nothing changes for existing sends.
+
 ## 0.2.0
 
 Breaking / behaviour changes — read before upgrading:
