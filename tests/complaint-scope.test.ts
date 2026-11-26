@@ -81,3 +81,20 @@ test('existing complaint rows keep stopping everything (no data change needed)',
   await applyFeedback(db, { type: 'complaint', email: 'old@example.com', source: 'ses-event', scope: 'marketing' });
   assert.equal(await suppressedReason(db, 'old@example.com', 'transactional'), 'complaint');
 });
+
+test('lifting a newsletter complaint needs "complaint" named explicitly; an earlier "no newsletters" row is upgraded', async () => {
+  const { removeSuppression } = await import('../src/core.ts');
+  const db = memoryDb();
+  await applyFeedback(db, { type: 'complaint', email: 'c@example.com', source: 'ses-event', scope: 'marketing' });
+  assert.deepEqual(await removeSuppression(db, 'c@example.com', ['unsubscribe']), []);
+  assert.equal(await suppressedReason(db, 'c@example.com', 'marketing'), 'unsubscribe');
+  assert.deepEqual(await removeSuppression(db, 'c@example.com', ['unsubscribe', 'complaint']), ['unsubscribe']);
+  assert.equal(await suppressedReason(db, 'c@example.com', 'marketing'), null);
+  // "No newsletters at all" first, complaint later: the row now says complaint.
+  await addSuppression(db, 'u@example.com', 'unsubscribe', 'unsubscribe-page', null);
+  await applyFeedback(db, { type: 'complaint', email: 'u@example.com', source: 'ses-event', scope: 'marketing' });
+  assert.deepEqual(await removeSuppression(db, 'u@example.com', ['unsubscribe']), []);
+  // A plain "no newsletters" row is still lifted with "unsubscribe" alone.
+  await addSuppression(db, 'p@example.com', 'unsubscribe', 'unsubscribe-page', null);
+  assert.deepEqual(await removeSuppression(db, 'p@example.com', ['unsubscribe']), ['unsubscribe']);
+});

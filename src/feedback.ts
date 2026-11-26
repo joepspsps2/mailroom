@@ -79,7 +79,12 @@ export async function applyFeedback(db: Db, ev: FeedbackEvent, opts: FeedbackOpt
 
   if (ev.type === 'complaint') {
     const marketingOnly = ev.scope === 'marketing';
-    if (marketingOnly) await addSuppression(db, email, 'unsubscribe', source, `complaint${ev.detail ? ` ${ev.detail}` : ''}`, now);
+    if (marketingOnly) {
+      const detail = `complaint${ev.detail ? ` ${ev.detail}` : ''}`.slice(0, 300);
+      const added = await addSuppression(db, email, 'unsubscribe', source, detail, now);
+      // 本來就有「全部不要」那一列（例：先在退訂頁全部退訂、後來又按檢舉）：改記成檢舉，解除時才會被要求明講。
+      if (!added) await db.prepare("UPDATE suppressions SET detail = ?, source = ? WHERE email = ? AND reason = 'unsubscribe' AND (detail IS NULL OR detail NOT LIKE 'complaint%')").bind(detail, source, email).run();
+    }
     else await addSuppression(db, email, 'complaint', source, ev.detail ?? null, now);
     // 這個人明白說了「不要」：所有名單一起退出。已經退訂的保留原本的時間與來源。
     await db

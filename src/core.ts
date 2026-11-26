@@ -159,7 +159,9 @@ export async function removeSuppression(db: Db, email: string, reasons: Suppress
   const addr = email.trim().toLowerCase();
   const removed: SuppressionReason[] = [];
   for (const reason of reasons) {
-    const r = await db.prepare('DELETE FROM suppressions WHERE email = ? AND reason = ?').bind(addr, reason).run();
+    // 電子報被檢舉記成 unsubscribe（detail 以 complaint 開頭）：只寫 unsubscribe 解不掉，要連 complaint 一起明講，免得把檢舉者當成一般「全部不要」的人放回來。
+    const guard = reason === 'unsubscribe' && !reasons.includes('complaint') ? " AND (detail IS NULL OR detail NOT LIKE 'complaint%')" : '';
+    const r = await db.prepare(`DELETE FROM suppressions WHERE email = ? AND reason = ?${guard}`).bind(addr, reason).run();
     if ((r.meta.changes ?? 0) > 0) removed.push(reason);
   }
   return removed;

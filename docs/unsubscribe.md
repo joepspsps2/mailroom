@@ -98,7 +98,7 @@ Everything is idempotent: the same event twice leaves the same state. Lifting a 
 Why two kinds of complaint: someone who marks a newsletter as spam is refusing the regular mailing, not their own sign-in links. Blocking
 transactional mail as well would leave them unable to receive anything. After a newsletter complaint the address is refused by every
 newsletter path — the person's own subscribe answers `blocked`, imports skip it, frozen lists and welcome mail skip it, the "pressed by
-mistake" resubscribe is refused — until someone lifts the `unsubscribe` suppression on purpose. Complaints recorded before this
+mistake" resubscribe is refused — until someone lifts it on purpose with `POST /v1/unsuppress` and `reasons: ["unsubscribe", "complaint"]` (`"unsubscribe"` alone does not lift a complaint). Complaints recorded before this
 change stay `complaint` rows and keep blocking every stream.
 
 ### Feeding events in

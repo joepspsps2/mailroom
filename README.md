@@ -173,7 +173,7 @@ curl -X POST $URL/v1/unsuppress -H "Authorization: Bearer $DRILL_TOKEN" \
   -d '{"email":"someone@example.com","reasons":["hard_bounce"]}'
 ```
 
-`reasons` is required (`hard_bounce`, `complaint`, `unsubscribe`) so you can't accidentally clear a complaint. Providers keep their own suppression lists (e.g. Resend → Suppressions); clear those there.
+`reasons` is required (`hard_bounce`, `complaint`, `unsubscribe`) so you can't accidentally clear a complaint. A complaint about a newsletter is stored as `unsubscribe` with detail `complaint…`; lifting it needs both `"unsubscribe"` and `"complaint"` in `reasons` (with `"unsubscribe"` alone it stays and is not listed in `removed`). Providers keep their own suppression lists (e.g. Resend → Suppressions); clear those there.
 
 **Roll back** — Cloudflare dashboard → Workers → mailroom → Deployments → Rollback, or `npx wrangler rollback`.
 
