@@ -7,6 +7,8 @@ export interface RecipientVars {
   email: string;
   unsubscribe_url: string;
   web_url: string;
+  /** 退訂用的 mailto 連結（含退訂券，例 `mailto:unsub@example.com?subject=<券>`）。只有內容裡用到 {{unsubscribe_mailto}}（compose 的 unsubscribeMailto）時才必填。 */
+  unsubscribe_mailto?: string | null;
 }
 
 export interface PersonalizeOptions {
@@ -24,7 +26,7 @@ export class PersonalizeError extends Error {
 }
 
 const SECTION_KEYS = ['name', 'email'] as const;
-const VALUE_KEYS = ['name', 'email', 'unsubscribe_url', 'web_url'] as const;
+const VALUE_KEYS = ['name', 'email', 'unsubscribe_url', 'web_url', 'unsubscribe_mailto'] as const;
 const TOKEN = /\{\{\s*([#/]?)\s*([a-z_]+)(?::(\d+))?\s*\}\}/g;
 
 export function escapeHtmlValue(s: string): string {
@@ -39,7 +41,7 @@ export function cleanName(v: string | null | undefined): string {
   return Array.from(s).slice(0, 60).join('');
 }
 
-export function checkVars(v: RecipientVars): { name: string; email: string; unsubscribe_url: string; web_url: string } {
+export function checkVars(v: RecipientVars): { name: string; email: string; unsubscribe_url: string; web_url: string; unsubscribe_mailto: string } {
   const name = cleanName(v.name);
   const email = typeof v.email === 'string' ? v.email.trim() : '';
   if (!email || /[\s<>"]/.test(email)) throw new PersonalizeError('missing_field', 'email 缺或格式不對');
@@ -48,7 +50,14 @@ export function checkVars(v: RecipientVars): { name: string; email: string; unsu
     if (!u) throw new PersonalizeError('missing_field', `${k} 不能是空的`);
     if (!/^https:\/\/[^\s<>"]+$/i.test(u)) throw new PersonalizeError('bad_url', `${k} 必須是 https 網址`);
   }
-  return { name, email, unsubscribe_url: v.unsubscribe_url.trim(), web_url: v.web_url.trim() };
+  // 給網址的欄位不准夾換行（會被拿去組標頭）
+  if (/[\r\n]/.test(v.unsubscribe_url) || /[\r\n]/.test(v.web_url)) throw new PersonalizeError('bad_url', '網址不能含換行');
+  let mailto = '';
+  if (v.unsubscribe_mailto !== undefined && v.unsubscribe_mailto !== null && v.unsubscribe_mailto !== '') {
+    mailto = String(v.unsubscribe_mailto).trim();
+    if (!/^mailto:[^\s<>",]+$/i.test(mailto)) throw new PersonalizeError('bad_url', 'unsubscribe_mailto 必須是 mailto: 連結（不含空白、逗號、角括號）');
+  }
+  return { name, email, unsubscribe_url: v.unsubscribe_url.trim(), web_url: v.web_url.trim(), unsubscribe_mailto: mailto };
 }
 
 /** 展開一段內容。mode 'html' 會跳脫值；'text' 與 'header' 原樣放入（header 另外擋掉換行）。 */
@@ -66,10 +75,16 @@ export function fill(template: string, vars: RecipientVars, mode: 'html' | 'text
     if (mark) throw new PersonalizeError('unbalanced_section', `區段標記 ${mark}${key} 沒有配對`);
     if (key === 'c' && n !== undefined) return needTrack(opts)('c', Number(n));
     if (key === 'o' && n === undefined) return needTrack(opts)('o');
-    if ((VALUE_KEYS as readonly string[]).includes(key) && n === undefined) return enc(v[key as (typeof VALUE_KEYS)[number]]);
+    if ((VALUE_KEYS as readonly string[]).includes(key) && n === undefined) {
+      const val = v[key as (typeof VALUE_KEYS)[number]];
+      if (key === 'unsubscribe_mailto' && !val) throw new PersonalizeError('missing_field', '內容用到 {{unsubscribe_mailto}}，但收件人資料沒有 unsubscribe_mailto');
+      return enc(val);
+    }
     throw new PersonalizeError('unknown_placeholder', `不認得的佔位 {{${key}}}`);
   });
   if (mode === 'header' && /[\r\n]/.test(out)) throw new PersonalizeError('bad_url', '標頭值不能含換行');
+  // 原稿跳脫過的「{」換回來；純文字版區段拿掉後留下的連續空行壓成一個
+  if (mode === 'text') out = out.replace(/\uE000/g, '{').replace(/\n{3,}/g, '\n\n');
   return out;
 }
 

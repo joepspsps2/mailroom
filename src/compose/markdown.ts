@@ -42,6 +42,23 @@ const clip = (s: string, n = 60) => (s.length > n ? `${s.slice(0, n)}…` : s).r
 const EMBED_TAG = /^\s*<\s*(iframe|video|audio|embed|object|canvas)\b/i;
 const ANY_TAG = /<\/?[a-zA-Z][^>]*>/;
 const BLOCK_HTML = /^\s*<\/?[a-zA-Z!]/;
+/** 行內標籤開頭的行不是 HTML 區塊，當一般段落（a、b、strong、i、em、br）。 */
+const INLINE_START = /^\s*<\s*(a|b|strong|i|em|br)\b/i;
+/** 原稿裡寫的 \{ 先換成這個私用字元，輸出時才變成真的「{」，避免被當成佔位。 */
+export const LBRACE = '\uE000';
+const protectBraces = (v: string) => v.replace(/\{\{/g, LBRACE + LBRACE);
+const NAMED: Record<string, string> = { nbsp: '\u00a0', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+/** 原稿文字裡的 HTML 實體（&nbsp; &amp; &#39; …）還原成字元；輸出時再統一跳脫一次。 */
+export function decodeEntities(t: string): string {
+  return t.replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]+);/gi, (m, e: string) => {
+    if (e[0] === '#') {
+      const n = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n > 0 && n < 0x110000 && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : m;
+    }
+    return NAMED[e.toLowerCase()] ?? m;
+  });
+}
+
 const URL_RE = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/g;
 
 function splitFrontmatter(src: string): { body: string; fm: Record<string, string> } {
@@ -133,7 +150,7 @@ function autolink(text: string): Inline[] {
     last = at + url.length;
   }
   if (last < text.length) out.push({ t: 'text', v: text.slice(last) });
-  return out;
+  return out.map((n) => (n.t === 'text' ? { t: 'text', v: decodeEntities(n.v) } : n));
 }
 
 export function parseInline(s: string, problems: Problem[], depth = 0): Inline[] {
@@ -149,7 +166,7 @@ export function parseInline(s: string, problems: Problem[], depth = 0): Inline[]
   while (i < s.length) {
     const ch = s[i];
     if (ch === '\\' && i + 1 < s.length && /[\\`*_{}[\]()#+\-.!|<>~]/.test(s[i + 1])) {
-      buf += s[i + 1];
+      buf += s[i + 1] === '{' ? LBRACE : s[i + 1];
       i += 2;
       continue;
     }
@@ -165,7 +182,7 @@ export function parseInline(s: string, problems: Problem[], depth = 0): Inline[]
       const end = s.indexOf('`', i + 1);
       if (end > i) {
         flush();
-        out.push({ t: 'code', v: s.slice(i + 1, end) });
+        out.push({ t: 'code', v: protectBraces(s.slice(i + 1, end)) });
         i = end + 1;
         continue;
       }
@@ -201,6 +218,37 @@ export function parseInline(s: string, problems: Problem[], depth = 0): Inline[]
         out.push({ t: 'br' });
         i += br[0].length;
         continue;
+      }
+      const auto = s.slice(i).match(/^<(https?:\/\/[^\s<>]+)>/i);
+      if (auto) {
+        flush();
+        out.push({ t: 'link', href: auto[1], c: [{ t: 'text', v: auto[1] }], bare: true });
+        i += auto[0].length;
+        continue;
+      }
+      // <a href="…">文字</a>：只取 href 當一般連結，其他屬性丟掉
+      const a = s.slice(i).match(/^<a\s+([^>]*)>/i);
+      if (a) {
+        const href = a[1].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        const closeAt = s.toLowerCase().indexOf('</a>', i + a[0].length);
+        if (href && closeAt > 0) {
+          flush();
+          out.push({ t: 'link', href: decodeEntities(href[1] ?? href[2] ?? ''), c: parseInline(s.slice(i + a[0].length, closeAt), problems, depth + 1) });
+          i = closeAt + 4;
+          continue;
+        }
+      }
+      // <b>／<strong>／<i>／<em> 成對才收
+      const fmt = s.slice(i).match(/^<(b|strong|i|em)>/i);
+      if (fmt) {
+        const name = fmt[1].toLowerCase();
+        const closeAt = s.toLowerCase().indexOf(`</${name}>`, i + fmt[0].length);
+        if (closeAt > 0) {
+          flush();
+          out.push({ t: name === 'b' || name === 'strong' ? 'strong' : 'em', c: parseInline(s.slice(i + fmt[0].length, closeAt), problems, depth + 1) });
+          i = closeAt + name.length + 3;
+          continue;
+        }
       }
       const tag = s.slice(i).match(/^<\/?[a-zA-Z][^>]*>/);
       if (tag) {
@@ -283,11 +331,19 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
     const fence = line.match(FENCE);
     if (fence) {
       const mark = fence[1];
+      const lang = line.trim().slice(mark.length).trim().toLowerCase();
       const body: string[] = [];
+      const start = line;
       i++;
       while (i < lines.length && !lines[i].trim().startsWith(mark)) body.push(lines[i++]);
+      if (i >= lines.length) {
+        // 沒收尾的程式碼框：不猜，後面的內容會被整段吃掉，所以直接記 error
+        problems.push({ code: 'unclosed_fence', severity: 'error', message: '程式碼框（```）沒有收尾，後面的內容會被吃掉', where: clip(start) });
+      }
       i++;
-      blocks.push({ t: 'code', v: body.join('\n') });
+      // 圖表（mermaid）信裡畫不出來：換成「到網站看」連結卡
+      if (lang === 'mermaid') blocks.push({ t: 'embed' });
+      else blocks.push({ t: 'code', v: protectBraces(body.join('\n')) });
       continue;
     }
     if (HR.test(line)) {
@@ -301,10 +357,14 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
       i++;
       continue;
     }
-    // HTML 註解：整段略過
+    // HTML 註解：整段略過；沒有結尾就記 error（不能把後面整段吃掉）
     if (line.trim().startsWith('<!--')) {
-      while (i < lines.length && !lines[i].includes('-->')) i++;
-      i++;
+      let j = i;
+      while (j < lines.length && !lines[j].includes('-->')) j++;
+      if (j >= lines.length) {
+        problems.push({ code: 'unclosed_comment', severity: 'error', message: 'HTML 註解（<!--）沒有收尾，後面的內容會被吃掉', where: clip(line) });
+        i++;
+      } else i = j + 1;
       continue;
     }
     // 自訂區塊語法（:::note 之類）
@@ -315,7 +375,7 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
       continue;
     }
     // 區塊 HTML
-    if (BLOCK_HTML.test(line) && ANY_TAG.test(line)) {
+    if (BLOCK_HTML.test(line) && ANY_TAG.test(line) && !INLINE_START.test(line)) {
       const start = line;
       const chunk: string[] = [];
       while (i < lines.length && lines[i].trim() !== '') chunk.push(lines[i++]);

@@ -25,6 +25,8 @@ export interface ComposeOptions {
   utmMedium?: string;
   /** 純文字版的連結是否也走追蹤轉址（預設是）。 */
   trackInText?: boolean;
+  /** 退訂標頭要不要多帶 mailto（`<{{unsubscribe_url}}>, <{{unsubscribe_mailto}}>`）。開了之後，personalize 的收件人資料必須帶 unsubscribe_mailto。 */
+  unsubscribeMailto?: boolean;
 }
 
 export interface LinkRecord {
@@ -72,16 +74,18 @@ function absolutize(u: string, base: string | undefined): string | null {
   }
 }
 
+/** 補 utm：直接接在原本網址後面，不重組查詢字串（帶簽章的網址、逗號、斜線都原樣保留）；已有的 utm_* 不蓋。 */
 function addUtm(u: string, p: { source: string; medium: string; campaign: string }): string {
-  try {
-    const url = new URL(u);
-    if (!url.searchParams.has('utm_source')) url.searchParams.set('utm_source', p.source);
-    if (!url.searchParams.has('utm_medium')) url.searchParams.set('utm_medium', p.medium);
-    if (!url.searchParams.has('utm_campaign')) url.searchParams.set('utm_campaign', p.campaign);
-    return url.toString();
-  } catch {
-    return u;
+  const hashAt = u.indexOf('#');
+  const frag = hashAt >= 0 ? u.slice(hashAt) : '';
+  let base = hashAt >= 0 ? u.slice(0, hashAt) : u;
+  const add: string[] = [];
+  for (const [k, v] of [['utm_source', p.source], ['utm_medium', p.medium], ['utm_campaign', p.campaign]] as const) {
+    if (!new RegExp(`[?&]${k}=`).test(base)) add.push(`${k}=${encodeURIComponent(v)}`);
   }
+  if (add.length === 0) return u;
+  base += base.includes('?') ? (/[?&]$/.test(base) ? '' : '&') : '?';
+  return base + add.join('&') + frag;
 }
 
 const plain = (ns: Inline[]): string =>
@@ -224,7 +228,10 @@ export function compose(opts: ComposeOptions): ComposeResult {
     preheader,
     html,
     text,
-    headers: { 'List-Unsubscribe': '<{{unsubscribe_url}}>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' },
+    headers: {
+      'List-Unsubscribe': opts.unsubscribeMailto ? '<{{unsubscribe_url}}>, <{{unsubscribe_mailto}}>' : '<{{unsubscribe_url}}>',
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    },
     links,
     images,
     problems,

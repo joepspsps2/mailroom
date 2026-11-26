@@ -5,3 +5,4 @@ export { createTemplate, escapeHtml, DEFAULT_THEME, DEFAULT_LABELS, type EmailTe
 export { personalize, fill, checkVars, cleanName, scanPlaceholders, PersonalizeError, type RecipientVars, type PersonalizeOptions } from './personalize.ts';
 export { preflight, TODO_MARKER, type PreflightOptions, type PreflightResult } from './preflight.ts';
 export { buildPreview, SAMPLE_VARS, type PreviewFiles, type PreviewOptions } from './preview.ts';
+export { detectScannerClicks, type ClickEvent, type ScannerRule } from './clicks.ts';
