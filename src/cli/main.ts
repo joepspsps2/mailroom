@@ -396,7 +396,7 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
       const data = { issue, subject: composed.subject, checkOk: check.ok, issues: check.issues };
       if (!yes) return dry(lines, data);
       const sourceRef = (typeof flags['source-ref'] === 'string' ? flags['source-ref'] : undefined) ?? post?.ref ?? sourcePath;
-      const saved = await call('PUT', `/v1/campaigns/${issue}`, { list, subject: composed.subject, preheader: composed.preheader || undefined, from, ...(d.replyTo ? { replyTo: d.replyTo } : {}), html: composed.html, text: composed.text, headers: composed.headers, webUrl, sourceRef, audience });
+      const saved = await call('PUT', `/v1/campaigns/${issue}`, { list, subject: composed.subject, preheader: composed.preheader || undefined, from, ...(d.replyTo ? { replyTo: d.replyTo } : {}), html: composed.html, text: composed.text, headers: composed.headers, webUrl, sourceRef, audience, ...(composed.links.length ? { links: composed.links.map((l) => ({ index: l.index, url: l.url })) } : {}) });
       const rec = await call('POST', `/v1/campaigns/${issue}/preflight`, { ok: check.ok, issues: check.issues.map((i) => ({ severity: i.severity, code: i.code, message: i.message })) });
       emit([...lines, '', `saved as draft (${saved.changed ? 'new or changed' : 'unchanged'}); check recorded: ${rec.preflightOk ? 'passed' : 'failed'}`, rec.preflightOk ? `Next: campaign preview ${issue} --yes` : 'Next: fix the errors above in the source, then run create again (same id updates the draft).'], { ...data, saved, preflightOk: rec.preflightOk });
       return rec.preflightOk ? 0 : 1;

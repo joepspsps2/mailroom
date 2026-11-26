@@ -15,7 +15,7 @@ Your apps hand a message to one Worker; the Worker does everything it can to get
 - **Bounce / complaint feedback** — Resend webhooks (Svix-signed) and Cloudflare Email Sending events update the ledger and the suppression list.
 - **A D1 ledger** — one row per message: recipient, sender, subject, provider, provider id, outcome, later events. Message bodies are never stored.
 
-It is **not** a newsletter or marketing-email system: there are no lists, campaigns, open/click tracking or unsubscribe pages. Requests with `stream: "marketing"` are rejected. It is not for cold email, and never will be — only send to people who asked to hear from you.
+Transactional sends (`send()`, `POST /v1/send`) reject `stream: "marketing"`. Newsletters go through the separate, opt-in newsletter desk below (lists, unsubscribe, broadcasting, tracking), which only sends to people on a list they subscribed to. It is not for cold email, and never will be — only send to people who asked to hear from you.
 
 ## Composing (preview)
 
@@ -29,6 +29,9 @@ before scheduling, waves, pacing under the provider's limits and your own daily 
 on bounces and complaints, and a reconciliation that must add up before an issue counts as done. Newsletter
 postmans: Amazon SES with signed SNS events ([docs/ses.md](docs/ses.md)) and a fake one for development. See
 [docs/broadcast.md](docs/broadcast.md).
+
+Click and open tracking runs on your own tracking host: signed per-recipient tokens, redirects only to links stored with the
+issue, scanner clicks and prefetched opens marked rather than deleted. See [docs/tracking.md](docs/tracking.md).
 
 ## How it works
 
@@ -138,6 +141,7 @@ If your app can't reach the mailroom at all, queue the message locally and retry
 | `POST /v1/drill`, `GET /v1/lookup`, `GET /v1/report`, `POST /v1/unsuppress` | Operator tools (see below) | `DRILL_TOKEN`; **if it isn't set these paths return 404**; 20 requests/min and 200/day in total |
 | `GET`/`POST /u/{token}`, `POST /u/{token}/resubscribe` | Unsubscribe page and one-click unsubscribe ([docs/unsubscribe.md](docs/unsubscribe.md)) | the unsubscribe token itself |
 | `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments` | Newsletter list management ([docs/lists.md](docs/lists.md)) | `DRILL_TOKEN`, same quota; bodies capped at 1.5 MB |
+| `GET /c/{token}`, `GET /o/{token}.gif` on the `TRACK_BASE_URL` host | Click redirect and open pixel ([docs/tracking.md](docs/tracking.md)) | the signed token itself |
 | `/v1/campaigns/*`, `/v1/throttle`, `/v1/warmup/*`, `/v1/broadcast/release-hold` | Newsletter broadcasting ([docs/broadcast.md](docs/broadcast.md)); 404 unless `MARKETING_DOMAIN` is set; test mail only if `TEST_RECIPIENTS` is set | `DRILL_TOKEN`, same quota; bodies capped at 3 MB |
 
 Apart from `GET /` (a plain-text health check), anything else returns 404. Unknown keys get a 404, not a 401, so the endpoint doesn't confirm that it exists. The operator endpoints only return status fields — never recipients, senders or subjects — so a leaked `DRILL_TOKEN` can't be used to read your mail log. It **can** still be used to send drill emails from your domain to any address (capped by the limit above) and to lift suppressions, so treat it like a password: set it only when you need it, and rotate it after use (`wrangler secret put DRILL_TOKEN`, or `wrangler secret delete DRILL_TOKEN` to switch the endpoints off). Request bodies must carry a `Content-Length` header (411 otherwise) and are capped at 3 MB (`/v1/send`) and 256 KB (webhook). Someone holding a leaked token can also use up the operator quota for the day, locking you out until you rotate the token.

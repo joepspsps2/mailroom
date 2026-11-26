@@ -7,6 +7,7 @@
 //   別的 Cloudflare 帳號的站帶自己的鑰匙 POST /v1/send；演習 POST /v1/drill；寄信統計 GET /v1/report；
 //   人工解除拒收 POST /v1/unsuppress。
 // - 退訂：GET／POST /u/{券}、POST /u/{券}/resubscribe；email() 收退訂信。
+// - 追蹤（TRACK_BASE_URL 那個 host）：GET /c/{券} 點擊轉址、GET /o/{券}.gif 開信圖（見 src/track.ts、docs/tracking.md）。
 // - 名單管理（帶管理口令）：PUT /v1/lists/{id}、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
 // - 群發（帶管理口令）：/v1/campaigns/*、/v1/throttle、/v1/warmup/*、/v1/broadcast/*（見 src/broadcast/routes.ts）；Queue mailroom-broadcast；排程每分鐘放水。
 // - Queue：Cloudflare 寄信的事後回報（cf-events.ts）。
@@ -27,6 +28,7 @@ import { handleEvent, verifySignature } from './webhook.ts';
 import { handleSesWebhook } from './ses-events.ts';
 import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
 import { broadcastQueue, broadcastTick, isBroadcastBatch, testSendDeps, type BroadcastEnv } from './broadcast/worker.ts';
+import { handleTrackRequest, resolveTrackSettings, trackHost, trackSecrets } from './track.ts';
 
 export interface Env extends BroadcastEnv {
   DB: D1Database;
@@ -218,8 +220,22 @@ function publicRow(row: MessageRow | null) {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // 開信與點擊追蹤：只在 TRACK_BASE_URL 的 host 上接 /c/、/o/；鑰匙或網址沒設＝不處理。
+    const tHost = trackHost(env.TRACK_BASE_URL);
+    if (tHost && url.hostname.toLowerCase() === tHost) {
+      const site = (jsonVar<Record<string, unknown>>(env.BROADCAST_CONFIG) ?? {}).site;
+      const tracked = await handleTrackRequest(request, {
+        db: env.DB,
+        secrets: trackSecrets(env.TRACK_TOKEN_SECRET, env.TRACK_TOKEN_SECRET_PREVIOUS),
+        host: tHost,
+        settings: resolveTrackSettings(env.TRACK_CONFIG, typeof site === 'string' ? site : undefined),
+        waitUntil: ctx ? (p) => ctx.waitUntil(p) : undefined,
+      });
+      if (tracked) return tracked;
+    }
 
     if (url.pathname === '/webhooks/resend' && request.method === 'POST') {
       const size = bodySizeProblem(request.headers.get('content-length'), MAX_WEBHOOK_BYTES);

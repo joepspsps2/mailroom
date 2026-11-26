@@ -17,6 +17,7 @@
     "./unsub": "./src/unsub.ts",
     "./feedback": "./src/feedback.ts",
     "./broadcast": "./src/broadcast/index.ts",
+    "./track": "./src/track.ts",
     "./cli": {
       "types": "./src/cli/main.ts",
       "default": "./dist/cli/main.js"

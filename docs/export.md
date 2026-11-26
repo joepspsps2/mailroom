@@ -38,7 +38,8 @@ and have their own rate bucket (`_export`: 60 per minute, 1000 per day), separat
 `detail` is the stored JSON (or `null`). Anything shaped like an email address is replaced with `[email]` when the event is recorded and again on export (`@channel`-style handles are not addresses and stay). Contract the analytics side relies on:
 
 - `detail.suspect = "scanner"` marks a click that a security scanner made (see `docs/composing.md`). Keep these rows, do not count them.
-- **`detail.prefetch = true` must be written explicitly by the tracking service** for opens that mail-privacy prefetching made. The user-agent string (`detail.ua`) is only a fallback hint and is not reliable; check a real message end to end once the tracker exists.
+- **`detail.prefetch = true` must be written explicitly by the tracking service** for opens that mail-privacy prefetching made. The built-in tracker (`docs/tracking.md`) does this; the user-agent string (`detail.ua`) is only a fallback hint and is not reliable. Check a real message end to end before relying on it.
+- Built-in tracker events have `provider = "self"`; `detail.scannerRule` says why a click was marked (`burst`, `head`, `asn`).
 - `detail.linkIndex` / `detail.url` identify the link of a click.
 - Unsubscribes are recorded by the engine itself when someone goes from subscribed to unsubscribed through the unsubscribe page, the one-click endpoint or an unsubscribe mail: `type = "unsubscribe"`, `detail = { via: "link" | "one_click" | "mailto", list, reason? }`. Repeating the request records nothing more. Unsubscribes made through the list API or a member-centre sync record no event, so a per-issue unsubscribe count only counts people who left from a mail of that issue.
 
