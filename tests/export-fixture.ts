@@ -14,8 +14,8 @@ const SEGMENTS = ['活躍群', '觀察群', '沉睡群', '新進觀察群'];
 
 /** 決定性的偽隨機（同一個 contact＋期別＋用途永遠同一個結果），讓測試與分析端的預期數字固定。 */
 export function pick(contact: number, issue: number, salt: string): number {
-  let h = 2166136261;
-  for (const ch of `${contact}|${issue}|${salt}`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  let h = 0x811c9dc5;
+  for (const ch of `${contact}|${issue}|${salt}`) h = Math.imul(h ^ ch.charCodeAt(0), 0x1000193) >>> 0;
   return (h % 10000) / 10000;
 }
 
