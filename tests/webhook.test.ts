@@ -42,3 +42,14 @@ test('檢舉進拒收名單；送達只更新帳本', async () => {
   assert.equal(await handleEvent(db, 'm2', JSON.stringify({ type: 'email.delivered', data: { email_id: 're_1', to: ['y@example.com'] } })), 'event:delivered');
   assert.equal(await suppressedReason(db, 'y@example.com', 'transactional'), null);
 });
+
+test('Resend 的檢舉與永久退信也走 applyFeedback：從所有電子報名單退訂（檢舉）、清暫時退信紀錄', async () => {
+  const { listDb } = await import('./lists-helpers.ts');
+  const { upsertList, listSubscribe } = await import('../src/lists.ts');
+  const db = listDb();
+  await upsertList(db, { id: 'weekly', name: 'Weekly' });
+  await listSubscribe(db, { list: 'weekly', email: 'x@example.com' });
+  await handleEvent(db, 'c1', JSON.stringify({ type: 'email.complained', data: { email_id: 're_9', to: ['X@example.com'] } }));
+  const row = db.raw.prepare('SELECT status, unsub_source FROM list_members').get() as { status: string; unsub_source: string };
+  assert.deepEqual({ ...row }, { status: 'unsubscribed', unsub_source: 'complaint' });
+});

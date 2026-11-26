@@ -3,7 +3,8 @@
 // 跟 Resend 的 webhook 進同一份拒收名單、同一張帳本（messages.provider_id＝Cloudflare 回的 messageId）。
 // 文件：https://developers.cloudflare.com/email-service/reference/event-subscriptions/（2026-11-04 查）
 
-import { addSuppression, type Db } from './core.ts';
+import { type Db } from './core.ts';
+import { applyFeedback } from './feedback.ts';
 
 interface CfEmailEvent {
   type?: string;
@@ -63,12 +64,12 @@ async function applyEvent(db: Db, ev: CfEmailEvent, name: string, now: Date): Pr
     // 只有硬退信（信箱不存在、網域收不到）才進拒收名單；暫時性重試用完的 soft 不擋。
     if (p.bounce?.type !== 'hard' || !email) return `bounce_${String(p.bounce?.type ?? 'unknown').toLowerCase()}`;
     const detail = [p.bounce.classification, p.bounce.reason, p.delivery?.smtpStatusCode].filter(Boolean).join(': ');
-    await addSuppression(db, email, 'hard_bounce', 'cloudflare-event', detail || null, now);
+    await applyFeedback(db, { type: 'bounce', kind: 'permanent', email, source: 'cloudflare-event', detail: detail || null }, { now: () => now });
     return 'hard_bounce:1';
   }
   if (name === 'complained') {
     if (!email) return 'complaint:0';
-    await addSuppression(db, email, 'complaint', 'cloudflare-event', p.complaint?.type ?? null, now);
+    await applyFeedback(db, { type: 'complaint', email, source: 'cloudflare-event', detail: p.complaint?.type ?? null }, { now: () => now });
     return 'complaint:1';
   }
   return last ? `event:${last}` : 'ignored';

@@ -62,8 +62,8 @@ export async function signUnsubToken(secrets: UnsubSecrets, claims: UnsubClaims)
   return `${payload}.${b64url(sig)}`;
 }
 
-/** 驗退訂券；任何一步不對（格式、簽章、鑰匙都不符）都回 null，不說哪裡錯。 */
-export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): Promise<UnsubClaims | null> {
+/** 只看形狀、不驗簽章：格式對的券才會有名單與聯絡人編號。告警用它判斷「像真券但簽章不對」與「純亂打」。 */
+export function unsubTokenShape(token: unknown): (UnsubClaims & { sig: string; payload: string }) | null {
   if (typeof token !== 'string' || token.length > 160) return null;
   const parts = token.split('.');
   if (parts.length !== 5) return null;
@@ -72,7 +72,14 @@ export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): P
   if (campaign !== '-' && !CAMPAIGN_ID.test(campaign)) return null;
   const contactId = parseInt(id36, 36);
   if (!Number.isSafeInteger(contactId) || contactId < 1) return null;
-  const payload = parts.slice(0, 4).join('.');
+  return { list, contactId, campaign: campaign === '-' ? null : campaign, sig, payload: parts.slice(0, 4).join('.') };
+}
+
+/** 驗退訂券；任何一步不對（格式、簽章、鑰匙都不符）都回 null，不說哪裡錯。 */
+export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): Promise<UnsubClaims | null> {
+  const shape = unsubTokenShape(token);
+  if (!shape) return null;
+  const { list, contactId, campaign, sig, payload } = shape;
   const sigBytes = fromB64url(sig);
   // 簽章的最後一個字元有幾個位元用不到，改它不會改變簽章內容；只收標準寫法，一張券只有一種長相。
   if (b64url(sigBytes.buffer) !== sig) return null;
@@ -80,7 +87,7 @@ export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): P
     if (!secret || secret.length < MIN_SECRET) continue;
     // crypto.subtle.verify 是定時比對。
     if (await crypto.subtle.verify('HMAC', await hmacKey(secret, 'verify'), sigBytes, new TextEncoder().encode(payload))) {
-      return { list, contactId, campaign: campaign === '-' ? null : campaign };
+      return { list, contactId, campaign };
     }
   }
   return null;
@@ -289,12 +296,51 @@ export interface UnsubHandlerConfig {
   text?: UnsubPageText;
   now?: () => Date;
   /** 券驗不過時呼叫（例：轉到管理員通知）。收到原始券字串；失敗不影響回應。 */
-  onInvalidToken?: (token: string, via: 'page' | 'mailto') => void | Promise<void>;
+  onInvalidToken?: (token: string, via: 'page' | 'mailto', ctx?: { from?: string; subject?: string | null }) => void | Promise<void>;
+  /** 收信退訂時資料庫寫入失敗（信已收下、不會重寄）：呼叫端要通知人工處理。收到完整券與寄件人。 */
+  onWriteFailed?: (info: { token: string; claims: UnsubClaims; from?: string }) => void | Promise<void>;
   /** 退訂成功（第一次或重複）後呼叫，給呼叫端記事件或通知；失敗不影響回應。 */
   onUnsubscribed?: (info: { claims: UnsubClaims; source: 'link' | 'one_click' | 'mailto'; reason: UnsubReason | null }) => void | Promise<void>;
 }
 
-const MAX_FORM_BYTES = 4096;
+const MAX_FORM_BYTES = 8192;
+
+/** 串流讀內文，累計超過上限就停止並回 null。 */
+async function readLimited(request: Request, max: number): Promise<Uint8Array | null> {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
+}
+
+/** RFC 8058 的一鍵退訂內文可以是 urlencoded 也可以是 multipart；兩種都收。讀不懂就當空表單。 */
+async function parseForm(bytes: Uint8Array, contentType: string | null): Promise<URLSearchParams> {
+  const out = new URLSearchParams();
+  try {
+    if (contentType && /^multipart\/form-data/i.test(contentType)) {
+      const fd = await new Response(bytes as BodyInit, { headers: { 'content-type': contentType } }).formData();
+      for (const [k, v] of fd.entries()) if (typeof v === 'string') out.append(k, v);
+      return out;
+    }
+  } catch {
+    return out;
+  }
+  return new URLSearchParams(new TextDecoder().decode(bytes));
+}
 const PATH = /^\/u\/([^/]+)(\/resubscribe)?\/?$/;
 
 async function safely(fn: (() => void | Promise<void>) | undefined) {
@@ -344,11 +390,10 @@ export async function handleUnsubRequest(db: Db, cfg: UnsubHandlerConfig, reques
       return page(text, r.status === 'not_found' ? 404 : 409, fill(text.resubscribeFailedTitle, r.listName ?? null), `<p>${fill(text.resubscribeFailedBody, r.listName ?? null)}</p>`);
     }
 
-    // POST：內文很小；超過上限直接拒（沒有合法的表單會這麼大）。
-    const declared = Number(request.headers.get('content-length') ?? '0');
-    if (declared > MAX_FORM_BYTES) return new Response('Payload too large', { status: 413 });
-    const raw = (await request.text()).slice(0, MAX_FORM_BYTES);
-    const form = new URLSearchParams(raw);
+    // POST：內文很小；邊讀邊數，超過上限就停（不管有沒有帶 content-length，沒有合法的表單會這麼大）。
+    const bytes = await readLimited(request, MAX_FORM_BYTES);
+    if (!bytes) return new Response('Payload too large', { status: 413 });
+    const form = await parseForm(bytes, request.headers.get('content-type'));
     const oneClick = form.get('List-Unsubscribe') === 'One-Click';
     const picked = form.get('reason');
     const reason = !oneClick && picked && (REASONS as readonly string[]).includes(picked) ? (picked as UnsubReason) : null;
@@ -373,6 +418,31 @@ export interface UnsubMail {
   from?: string;
   subject?: string | null;
 }
+/** 把主旨裡的 MIME 編碼字（`=?UTF-8?B?…?=`、`=?UTF-8?Q?…?=`）解開；相鄰的編碼字之間的空白不算。不認得的編碼原樣留著。 */
+export function decodeMimeWords(input: string): string {
+  const joined = String(input ?? '').replace(/(\?=)\s+(?==\?)/g, '$1');
+  return joined.replace(/=\?([A-Za-z0-9_-]+)\?([bBqQ])\?([^?]*)\?=/g, (whole, charset: string, enc: string, body: string) => {
+    try {
+      let bytes: Uint8Array;
+      if (enc.toLowerCase() === 'b') {
+        const bin = atob(body);
+        bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      } else {
+        const q = body.replace(/_/g, ' ');
+        const raw: number[] = [];
+        for (let i = 0; i < q.length; i++) {
+          if (q[i] === '=' && /^[0-9A-Fa-f]{2}$/.test(q.slice(i + 1, i + 3))) { raw.push(parseInt(q.slice(i + 1, i + 3), 16)); i += 2; }
+          else raw.push(q.charCodeAt(i) & 0xff);
+        }
+        bytes = Uint8Array.from(raw);
+      }
+      return new TextDecoder(charset.toLowerCase() === 'us-ascii' ? 'utf-8' : charset).decode(bytes);
+    } catch {
+      return whole;
+    }
+  });
+}
+
 export type UnsubMailOutcome = 'unsubscribed' | 'invalid_token' | 'no_token' | 'failed';
 
 /**
@@ -380,20 +450,22 @@ export type UnsubMailOutcome = 'unsubscribed' | 'invalid_token' | 'no_token' | '
  * onNoToken 轉人工。不回信（避免信件迴圈），不讀信件本文。
  */
 export async function handleUnsubMail(db: Db, cfg: UnsubHandlerConfig & { onNoToken?: (mail: UnsubMail) => void | Promise<void> }, mail: UnsubMail): Promise<UnsubMailOutcome> {
-  const token = findUnsubToken(String(mail?.subject ?? ''));
+  const subject = String(mail?.subject ?? '');
+  const token = findUnsubToken(subject) ?? findUnsubToken(decodeMimeWords(subject));
   if (!token) {
     await safely(() => cfg.onNoToken?.(mail));
     return 'no_token';
   }
   const claims = await verifyUnsubToken(cfg.secrets, token);
   if (!claims) {
-    await safely(() => cfg.onInvalidToken?.(token, 'mailto'));
+    await safely(() => cfg.onInvalidToken?.(token, 'mailto', { from: mail.from, subject: mail.subject ?? null }));
     return 'invalid_token';
   }
   try {
     await unsubscribeByClaims(db, claims, 'mailto', null, cfg.now);
   } catch (e) {
     console.error('unsub mail failed', e instanceof Error ? e.message : 'unknown');
+    await safely(() => cfg.onWriteFailed?.({ token, claims, from: mail.from }));
     return 'failed';
   }
   await safely(() => cfg.onUnsubscribed?.({ claims, source: 'mailto', reason: null }));

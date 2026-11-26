@@ -1,7 +1,8 @@
 // Resend 的事後回報（webhook）：退信、檢舉、送達。驗簽章（Svix／Standard Webhooks）後才處理。
 // Resend 的 webhook 是整個帳號一份：同一個 Resend 帳號下其他程式寄的信也會回報到這裡，所以拒收名單是共用的一份。
 
-import { addSuppression, type Db } from './core.ts';
+import { type Db } from './core.ts';
+import { applyFeedback } from './feedback.ts';
 
 /** 簽章時間跟現在差超過 5 分鐘就不收（防重播）。 */
 const TOLERANCE_S = 5 * 60;
@@ -88,11 +89,12 @@ async function applyEvent(db: Db, ev: ResendEvent, now: Date): Promise<string> {
     // 只有永久退信（信箱不存在、網域收不到信）才進拒收名單；信箱滿了這類暫時性的不擋。
     if (data.bounce?.type !== 'Permanent') return `bounce_${String(data.bounce?.type ?? 'unknown').toLowerCase()}`;
     const detail = [data.bounce.subType, data.bounce.message].filter(Boolean).join(': ');
-    for (const email of recipients) await addSuppression(db, email, 'hard_bounce', 'resend-webhook', detail || null, now);
+    for (const email of recipients) await applyFeedback(db, { type: 'bounce', kind: 'permanent', email, source: 'resend-webhook', detail: detail || null }, { now: () => now });
     return `hard_bounce:${recipients.length}`;
   }
   if (type === 'email.complained') {
-    for (const email of recipients) await addSuppression(db, email, 'complaint', 'resend-webhook', null, now);
+    // 經過 applyFeedback：除了進拒收名單，也把這個人從所有電子報名單退訂。
+    for (const email of recipients) await applyFeedback(db, { type: 'complaint', email, source: 'resend-webhook' }, { now: () => now });
     return `complaint:${recipients.length}`;
   }
   return last ? `event:${last}` : 'ignored';

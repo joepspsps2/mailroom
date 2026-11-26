@@ -4,7 +4,7 @@
 // 規則：
 // - 永久退信 → 全域拒收 hard_bounce（所有信都不寄，包含登入類通知信）。
 // - 檢舉 → 全域拒收 complaint（同上），並把這個人在所有名單標 unsubscribed（unsub_source='complaint'）。
-// - 暫時性退信（信箱滿了）→ 不擋；同一人連續 3 期（三個不同的期別、中間沒有送達）暫時性退信 → 當硬退信處理。
+// - 暫時性退信 → 不擋；信箱層級（cause＝mailbox）的，同一人連續 3 期（三個不同的期別、中間沒有送達）→ 當硬退信處理；內容被拒這類不累計。
 // - 送達 → 清掉這個人的暫時退信紀錄（連續中斷）。
 // 全部可重複執行：同一則事件送兩次，結果一樣。
 
@@ -12,9 +12,26 @@ import { addSuppression, type Db } from './core.ts';
 import { normalizeEmail } from './lists.ts';
 
 export type FeedbackEvent =
-  | { type: 'bounce'; kind: 'permanent' | 'transient'; email: string; /** 這封信屬於哪一期；暫時性退信沒有期別就不計入連續。 */ campaign?: string | null; source: string; detail?: string | null }
+  | { type: 'bounce'; kind: 'permanent'; email: string; source: string; detail?: string | null }
+  | {
+      type: 'bounce';
+      kind: 'transient';
+      email: string;
+      /** 這封信屬於哪一期；沒有期別就不計入連續。 */
+      campaign?: string | null;
+      /**
+       * 為什麼暫時退信。只有 'mailbox'（信箱層級：信箱滿了、收信伺服器暫時掛了、對方限速）才累計；
+       * 'content'（內容被拒、附件被拒、信太大）跟信箱無關，不累計，免得把正常讀者誤判成硬退信。沒給＝不累計。
+       * SES 對照：Transient 的 General、MailboxFull → mailbox；ContentRejected、AttachmentRejected、MessageTooLarge → content。
+       */
+      cause?: TransientCause;
+      source: string;
+      detail?: string | null;
+    }
   | { type: 'complaint'; email: string; source: string; detail?: string | null }
   | { type: 'delivery'; email: string };
+
+export type TransientCause = 'mailbox' | 'content';
 
 export type FeedbackOutcome =
   | 'hard_bounce'
@@ -22,6 +39,7 @@ export type FeedbackOutcome =
   | 'transient_counted'
   | 'transient_promoted'
   | 'transient_no_campaign'
+  | 'transient_not_counted'
   | 'delivery'
   | 'rejected';
 
@@ -74,6 +92,7 @@ export async function applyFeedback(db: Db, ev: FeedbackEvent, opts: FeedbackOpt
   }
 
   if (ev.type === 'bounce' && ev.kind === 'transient') {
+    if (ev.cause !== 'mailbox') return 'transient_not_counted';
     if (typeof ev.campaign !== 'string' || !CAMPAIGN.test(ev.campaign)) return 'transient_no_campaign';
     // 同一期同一人只算一次（重送的事件不會重複計數）。
     await db.prepare('INSERT INTO bounce_streaks (email, campaign_id, at) VALUES (?, ?, ?) ON CONFLICT (email, campaign_id) DO NOTHING').bind(email, ev.campaign, t).run();
