@@ -478,3 +478,60 @@ test('小問題：&nbsp; 不重複跳脫；{{ 可用 \\{\\{ 跳脫成字面；�
   const real404 = await pf(compose(base()), { fetch: async () => ({ status: 404 }) });
   assert.ok(codes(real404).includes('link_broken'));
 });
+
+test('註解不論在哪都藏起來：段落下一行、清單項目裡、行內、跨行、連續兩個；程式碼框裡的註解不動', async () => {
+  const src = `${FM}段落一\n<!-- 備註甲 -->\n段落尾\n\n- 項目\n  <!-- 備註乙 -->\n- 項目二\n\n文字 <!-- 備註丙 --> 文字\n\n前\n<!-- 備註丁\n第二行\n-->\n後\n\n<!-- 戊 --><!-- 己 -->結尾字\n\n\`\`\`\n<!-- 程式碼框裡的註解要留 -->\n\`\`\``;
+  const c = compose(base({ source: src }));
+  assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), []);
+  for (const hidden of ['備註甲', '備註乙', '備註丙', '備註丁', '第二行', '戊', '己']) {
+    assert.ok(!c.html.includes(hidden) && !c.text.includes(hidden), `${hidden} 不該出現在信裡`);
+  }
+  for (const shown of ['段落一', '段落尾', '項目二', '文字', '前', '後', '結尾字']) assert.ok(c.text.includes(shown), `${shown} 應保留`);
+  assert.match(c.html, /&lt;!-- 程式碼框裡的註解要留 --&gt;/);
+  assert.deepEqual(codes(await pf(c)), []);
+});
+
+test('沒收尾的註解（行首、段落下一行、清單項目裡、行內）都記 error，且後面的文字不被吃掉', async () => {
+  for (const [name, src] of [
+    ['行首', `${FM}前面\n\n<!-- 沒收尾\n\n後面段落`],
+    ['段落下一行', `${FM}前面\n<!-- 沒收尾\n\n後面段落`],
+    ['清單項目裡', `${FM}- 項目\n  <!-- 沒收尾\n\n後面段落`],
+    ['行內', `${FM}前面 <!-- 沒收尾\n\n後面段落`],
+  ] as const) {
+    const c = compose(base({ source: src }));
+    assert.ok(c.problems.some((p) => p.code === 'unclosed_comment' && p.severity === 'error'), `${name}：要記 unclosed_comment`);
+    assert.match(c.text, /後面段落/, `${name}：後面段落要保留`);
+    assert.ok(!(await pf(c)).ok, `${name}：不准排程`);
+  }
+});
+
+test('行首單獨一個 <https://…> 自動連結：是連結，不是 HTML 區塊；後面的圖與段落都在', async () => {
+  const c = compose(base({ source: `${FM}前言\n\n<https://example.com/alone>\n\n![後面的圖](https://img.example.com/after.png)\n\n<https://example.com/two> 行首接文字\n\n結尾段落` }));
+  assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), []);
+  assert.deepEqual(c.links.map((l) => l.original), ['https://example.com/alone', 'https://example.com/two']);
+  assert.equal(c.images.length, 1);
+  assert.match(c.text, /結尾段落/);
+  assert.deepEqual(codes(await pf(c)), []);
+});
+
+test('頁尾用單引號的連結與圖也檢查；沒有追蹤網址時同一個網址不打兩次', async () => {
+  const tpl = createTemplate({ brandName: 'B', postalAddress: '1 Example Street', footerHtml: "<a href='https://example.com/single'>x</a><img src='https://cdn.example.com/s.png' alt='s'>" });
+  const asked: string[] = [];
+  const gone: PreflightOptions['fetch'] = async (u) => { asked.push(u); return { status: u.includes('single') || u.includes('s.png') ? 404 : 200 }; };
+  const r = await preflight(compose(base({ template: tpl })), { template: tpl, fetch: gone, webUrl: WEB });
+  assert.ok(codes(r).includes('link_broken') && codes(r).includes('image_broken'));
+  const asked2: string[] = [];
+  const c = compose(base({ trackBase: undefined, source: `${FM}[a](https://example.com/one) [b](https://example.com/two)` }));
+  await pf(c, { fetch: async (u, init) => { if (init?.method === 'HEAD') asked2.push(u); return { status: 200 }; } });
+  assert.equal(asked2.filter((u) => u.includes('/one')).length, 1);
+  assert.equal(asked2.filter((u) => u.includes('/two')).length, 1);
+});
+
+test('只有 <div …> 或 </div> 的外框行（語言標記等）：外框丟掉、裡面的引言與段落照常轉', () => {
+  const c = compose(base({ source: `${FM}前\n\n<div lang="zh-Hans">\n\n> 引言內容\n\n</div>\n\n後` }));
+  assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), []);
+  assert.match(c.html, /<blockquote/);
+  assert.ok(!c.html.includes('<div lang'));
+  // 帶別的內容的 div 仍然不收
+  assert.ok(compose(base({ source: `${FM}<div class="x">夾帶文字</div>` })).problems.some((p) => p.code === 'unsupported_html'));
+});

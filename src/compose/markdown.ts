@@ -43,7 +43,7 @@ const EMBED_TAG = /^\s*<\s*(iframe|video|audio|embed|object|canvas)\b/i;
 const ANY_TAG = /<\/?[a-zA-Z][^>]*>/;
 const BLOCK_HTML = /^\s*<\/?[a-zA-Z!]/;
 /** 行內標籤開頭的行不是 HTML 區塊，當一般段落（a、b、strong、i、em、br）。 */
-const INLINE_START = /^\s*<\s*(a|b|strong|i|em|br)\b/i;
+const INLINE_START = /^\s*<\s*(a|b|strong|i|em|br)\b|^\s*<https?:\/\//i;
 /** 原稿裡寫的 \{ 先換成這個私用字元，輸出時才變成真的「{」，避免被當成佔位。 */
 export const LBRACE = '\uE000';
 const protectBraces = (v: string) => v.replace(/\{\{/g, LBRACE + LBRACE);
@@ -357,14 +357,9 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
       i++;
       continue;
     }
-    // HTML 註解：整段略過；沒有結尾就記 error（不能把後面整段吃掉）
-    if (line.trim().startsWith('<!--')) {
-      let j = i;
-      while (j < lines.length && !lines[j].includes('-->')) j++;
-      if (j >= lines.length) {
-        problems.push({ code: 'unclosed_comment', severity: 'error', message: 'HTML 註解（<!--）沒有收尾，後面的內容會被吃掉', where: clip(line) });
-        i++;
-      } else i = j + 1;
+    // 只有 <div …> 或 </div> 的行（例如語言標記的外框）：外框丟掉，裡面的內容照常轉
+    if (/^\s*<\/?div\b[^>]*>\s*$/i.test(line)) {
+      i++;
       continue;
     }
     // 自訂區塊語法（:::note 之類）
@@ -467,9 +462,75 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
   return blocks;
 }
 
+/**
+ * 拿掉 HTML 註解（<!-- … -->）：行首、段落下一行、清單項目裡、行內、跨行，位置都一樣處理（CommonMark 的註解可以打斷段落）。
+ * 程式碼框（``` 或 ~~~）裡的不動。找不到結尾的註解＝記 error，且保留原文（不能把後面整段吃掉）。
+ */
+export function stripComments(lines: string[], problems: Problem[]): string[] {
+  const out: string[] = [];
+  let fence: string | null = null;
+  let open: { at: number; line: string } | null = null; // 註解開始的位置：輸出第幾行、原文
+  const origin: string[] = [];
+  for (const line of lines) {
+    if (!open) {
+      const f = line.match(FENCE);
+      if (fence) {
+        out.push(line);
+        if (line.trim().startsWith(fence)) fence = null;
+        continue;
+      }
+      if (f) {
+        fence = f[1];
+        out.push(line);
+        continue;
+      }
+    }
+    const wasOpen = open !== null;
+    let rest = line;
+    let kept = '';
+    let removed = false;
+    let reset = false;
+    for (;;) {
+      if (open) {
+        const e = rest.indexOf('-->');
+        if (e < 0) {
+          rest = '';
+          removed = true;
+          break;
+        }
+        rest = rest.slice(e + 3);
+        open = null;
+        removed = true;
+      } else {
+        const st = rest.indexOf('<!--');
+        if (st < 0) {
+          kept += rest;
+          break;
+        }
+        kept += rest.slice(0, st);
+        rest = rest.slice(st + 4);
+        removed = true;
+        open = { at: out.length, line };
+        origin.length = 0;
+        origin.push(line);
+        reset = true;
+      }
+    }
+    if (wasOpen && open && !reset) origin.push(line);
+    out.push(removed && kept.trim() === '' ? '' : kept);
+  }
+  if (open) {
+    // 沒收尾：記 error，並把註解開始那行之後的原文放回去
+    problems.push({ code: 'unclosed_comment', severity: 'error', message: 'HTML 註解（<!--）沒有收尾，後面的內容會被吃掉', where: clip(open.line) });
+    out.length = open.at;
+    out.push(...origin);
+  }
+  return out;
+}
+
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const problems: Problem[] = [];
-  const blocks = parseBlocks(body.split('\n'), problems);
+  const blocks = parseBlocks(stripComments(body.split('\n'), problems), problems);
   return { blocks, problems, frontmatter: fm };
 }
