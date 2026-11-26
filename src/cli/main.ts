@@ -343,11 +343,6 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
       } catch {
         throw new CliError(`Could not read the source file "${sourcePath}".\nNext: check the path.`);
       }
-      const template = createTemplate(d.template);
-      const composed = compose({ ...d.composeDefaults, source, template, issue, ...(typeof flags.subject === 'string' ? { subject: flags.subject } : {}) });
-      const webUrl = (typeof flags['web-url'] === 'string' ? flags['web-url'] : undefined) ?? post?.webUrl ?? d.webUrlFor?.(composed.frontmatter);
-      if (!webUrl) throw new CliError('The web version URL is unknown.\nNext: pass --web-url https://... (the page of this issue on the website).', 2);
-      const check: PreflightResult = await preflight(composed, { template, webUrl, checkLinks: flags.offline !== true, fetch: io.fetch });
       const list = (typeof flags.list === 'string' ? flags.list : d.list) ?? '';
       const from = (typeof flags.from === 'string' ? flags.from : d.from) ?? '';
       if (!list || !from) throw new CliError('The list and the sender are required: pass --list/--from or set them in the defaults.', 2);
@@ -360,6 +355,11 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
         }
       }
       if (!audience) throw new CliError('No audience: pass --audience or set it in the defaults.', 2);
+      const template = createTemplate(d.template);
+      const composed = compose({ ...d.composeDefaults, source, template, issue, ...(typeof flags.subject === 'string' ? { subject: flags.subject } : {}) });
+      const webUrl = (typeof flags['web-url'] === 'string' ? flags['web-url'] : undefined) ?? post?.webUrl ?? d.webUrlFor?.(composed.frontmatter);
+      if (!webUrl) throw new CliError('The web version URL is unknown.\nNext: pass --web-url https://... (the page of this issue on the website).', 2);
+      const check: PreflightResult = await preflight(composed, { template, webUrl, checkLinks: flags.offline !== true, fetch: io.fetch });
       const errors = check.issues.filter((i) => i.severity === 'error');
       const lines = [
         `${issue}: "${composed.subject}"`, `from ${from}   list ${list}   web version ${webUrl}`, `HTML ${composed.htmlBytes} bytes, ${composed.links.length} links, ${composed.images.length} images`,
