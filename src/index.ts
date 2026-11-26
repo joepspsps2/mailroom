@@ -6,12 +6,14 @@
 // - 公開網址（workers.dev）：Resend 事後回報 POST /webhooks/resend；
 //   別的 Cloudflare 帳號的站帶自己的鑰匙 POST /v1/send；演習 POST /v1/drill；寄信統計 GET /v1/report；
 //   人工解除拒收 POST /v1/unsuppress。
+// - 名單管理（帶管理口令）：PUT /v1/lists/{id}、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
 // - Queue：Cloudflare 寄信的事後回報（cf-events.ts）。
 // - 排程：有設 cron 時，每次順手清舊計數窗；有設 DAILY_DRILL 時每天最多寄一輪演習信（過了 until 自動停）；有設 LEDGER_RETENTION_DAYS 時清過期帳本列。
 
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { bodySizeProblem, checkHttpFrom, limitVar, localDay, lookup, parseAddress, pruneRate, purgeLedger, removeSuppression, retentionDays, send, SUPPRESSION_REASONS, takeRate, TIERS, type SuppressionReason, type CoreDeps, type MessageRow, type RouteTable, type SendRequest, type SendResult, type Tier } from './core.ts';
 import { handleCfEvent } from './cf-events.ts';
+import { importMembers, listMembers, listStatus, listSubscribe, listUnsubscribe, setSegments, upsertList, type ImportOptions, type ImportRow, type SegmentInput, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
 
@@ -56,6 +58,8 @@ const ADMIN_LIMITS = { perMinute: 20, perDay: 200 };
 /** 請求內文上限（位元組，一定要帶 content-length）：寄信 3 MB（內文上限 html 40 萬＋text 20 萬字元，中文 UTF-8 一字 3 bytes）、webhook 256 KB。 */
 const MAX_SEND_BYTES = 3_000_000;
 const MAX_WEBHOOK_BYTES = 256_000;
+/** 名單管理入口的請求內文上限：匯入 2,000 筆、分群 5,000 筆都放得下。 */
+const MAX_LIST_BYTES = 1_500_000;
 
 
 interface DailyDrill { until: string; to: string[]; site?: string; tier?: Tier; routes?: MailRoute[]; utcOffsetHours?: number }
@@ -153,6 +157,19 @@ export class Mailroom extends WorkerEntrypoint<Env> {
   drill(site: string, input: DrillInput) {
     return drill(this.env, site, input);
   }
+  // 電子報名單（內線）：見 docs/lists.md。
+  listSubscribe(input: SubscribeInput) {
+    return listSubscribe(this.env.DB, input);
+  }
+  listUnsubscribe(input: UnsubscribeInput) {
+    return listUnsubscribe(this.env.DB, input);
+  }
+  listStatus(input: { list: string; email: string }) {
+    return listStatus(this.env.DB, input);
+  }
+  listMembers(input: { list: string; status?: 'subscribed' | 'unsubscribed'; cursor?: string | null; limit?: number }) {
+    return listMembers(this.env.DB, input);
+  }
 }
 
 function sameToken(a: string, b: string): boolean {
@@ -238,6 +255,32 @@ export default {
       if (fromProblem) return json({ status: 'rejected', retryable: false, reason: 'from_not_allowed' }, 400);
       const result = await send(deps(env), { ...req, site });
       return json(result, result.status === 'rejected' ? 400 : result.status === 'failed' ? 502 : 200);
+    }
+
+    // 名單管理入口（帶管理口令）：PUT /v1/lists/{id}（建立或更新）、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
+    const listPath = /^\/v1\/lists\/([a-z0-9][a-z0-9-]{0,39})(\/import|\/segments)?$/.exec(url.pathname);
+    if (listPath) {
+      const wanted = listPath[2] ? 'POST' : 'PUT';
+      if (request.method !== wanted) return notFound();
+      if (!sameToken(bearer(request), env.DRILL_TOKEN ?? '')) return notFound();
+      const adminOver = await takeRate(env.DB, '_admin', ADMIN_LIMITS);
+      if (adminOver) return new Response('rate limited', { status: 429, headers: { 'retry-after': adminOver === 'day' ? '3600' : '60' } });
+      const size = bodySizeProblem(request.headers.get('content-length'), MAX_LIST_BYTES);
+      if (size) return json({ ok: false, reason: size === 'missing' ? 'length_required' : 'too_large' }, size === 'missing' ? 411 : 413);
+      const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!body || typeof body !== 'object') return json({ ok: false, reason: 'bad_json' }, 400);
+      const id = listPath[1];
+      if (!listPath[2]) {
+        const r = await upsertList(env.DB, { id, name: body.name as string, fromAddr: body.fromAddr as string | undefined, replyTo: body.replyTo as string | undefined, welcomeTemplate: body.welcomeTemplate as string | undefined });
+        return json(r, r.ok ? 200 : 400);
+      }
+      if (listPath[2] === '/segments') {
+        const r = await setSegments(env.DB, id, body.items as SegmentInput[]);
+        return json(r, r.ok ? 200 : r.reason === 'too_many' ? 413 : 400);
+      }
+      const opts: ImportOptions = { importedFrom: body.importedFrom as string, dryRun: body.dryRun === true, expected: body.expected as ImportOptions['expected'] };
+      const r = await importMembers(env.DB, id, body.rows as ImportRow[], opts);
+      return json(r, r.ok ? 200 : r.reason === 'too_many' ? 413 : 400);
     }
 
     const postPaths = ['/v1/drill', '/v1/unsuppress'];
