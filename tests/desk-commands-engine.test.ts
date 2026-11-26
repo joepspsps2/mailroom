@@ -6,6 +6,7 @@ import { activeHold, approveCampaign, campaignStatus, explainPause, recordPrefli
 import { handleBroadcastRequest } from '../src/broadcast/routes.ts';
 import { FakePostman } from '../src/broadcast/postman.ts';
 import { parseAllowed } from '../src/broadcast/test-send.ts';
+import { normalizeSesEvent } from '../src/ses-events.ts';
 import { flushSuppressedAlerts, resetAlertWarning, sendAlert } from '../src/alert.ts';
 
 const ADD = (over: Record<string, unknown> = {}) => ({ list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: '<p>Hi {{name}} <a href="{{unsubscribe_url}}">u</a> {{web_url}}</p>', text: 'Hi {{unsubscribe_url}} {{web_url}}', headers: { 'List-Unsubscribe': '<{{unsubscribe_url}}>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }, audience: { waves: [['*']] }, ...over });
@@ -268,4 +269,22 @@ test('測試信的事件：記下，但不進拒收名單、不退訂、不算�
   assert.equal(w.count('suppressions', "email = 'qa-box@example.com'"), 0);
   assert.equal(w.count('events', "provider_event_id LIKE 't-%'"), 2);
   assert.equal(w.count('events', "contact_id IS NOT NULL AND provider_event_id LIKE 't-%'"), 0);
+});
+
+test('測試信的事件走 SES 正規化（SNS 訊息 → ProviderEvent → 入帳）：測試信箱檢舉或永久退信，不進拒收名單', async () => {
+  const w = await makeWorld({ members: 3 });
+  const { ingestEvent } = await import('../src/broadcast/index.ts');
+  const mail = { messageId: 'ses-m-1', timestamp: '2027-03-01T00:00:00.000Z', destination: ['qa-box@example.com'], tags: { campaign: ['te-2'], contact: ['test'] } };
+  const complaint = { eventType: 'Complaint', mail, complaint: { complainedRecipients: [{ emailAddress: 'qa-box@example.com' }], complaintFeedbackType: 'abuse', timestamp: '2027-03-01T00:02:00.000Z' } };
+  const bounce = { eventType: 'Bounce', mail: { ...mail, messageId: 'ses-m-2' }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: 'qa-box@example.com' }], timestamp: '2027-03-01T00:02:00.000Z' } };
+  const evs = [...normalizeSesEvent(complaint, 'sns-a'), ...normalizeSesEvent(bounce, 'sns-b')];
+  assert.equal(evs.length, 2);
+  assert.ok(evs.every((e) => e.contact === 'test'), 'SES 正規化要保留 test 標記');
+  for (const e of evs) await ingestEvent(w.db, e, { now: w.now });
+  assert.equal(w.count('suppressions', "email = 'qa-box@example.com'"), 0);
+  assert.equal(w.count('events', "provider = 'ses'"), 2);
+  // 對照：同一個地址的「真收件人」事件（數字聯絡人）仍照常進拒收名單
+  const real = normalizeSesEvent({ ...complaint, mail: { ...mail, messageId: 'ses-m-3', tags: { campaign: ['te-2'], contact: ['7'] } } }, 'sns-c');
+  for (const e of real) await ingestEvent(w.db, e, { now: w.now });
+  assert.equal(w.count('suppressions', "email = 'qa-box@example.com'"), 1);
 });

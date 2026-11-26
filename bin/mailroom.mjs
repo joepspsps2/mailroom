@@ -5,14 +5,10 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-// 裝成套件時用建置好的 JS（dist）：Node 不替 node_modules 裡的 .ts 去除型別。在原始碼資料夾裡開發時沒有 dist，直接用 .ts。
-let main;
-try {
-  main = await import('../dist/cli/main.js');
-} catch (e) {
-  if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
-  main = await import('../src/cli/main.ts');
-}
+// 原始碼資料夾裡（有 src）優先用 src，免得打包留下的舊 dist 蓋過最新的程式；裝成套件時沒有 src，用建置好的 JS（Node 不替 node_modules 裡的 .ts 去除型別）。
+import { existsSync } from 'node:fs';
+const srcMain = new URL('../src/cli/main.ts', import.meta.url);
+const main = existsSync(srcMain) && !import.meta.url.includes('/node_modules/') ? await import(srcMain.href) : await import('../dist/cli/main.js');
 const { runCli } = main;
 
 const argv = process.argv.slice(2);
