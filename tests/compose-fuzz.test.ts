@@ -173,6 +173,22 @@ const REVIEW_CASES: [string, string, string | null][] = [
   ['收斂 網址當連結文字不擋', 'BODY1X：[https://example.com/](https://example.com/) BODY2X', null],
   ['收斂 查詢字串與底線的網址不擋', 'BODY1X https://example.com/News_Content.aspx?n=1&s=2 BODY2X', null],
   ['複審 縮排碼後不從 1 開始的有序清單', '\t<!--CODE1X-->\n2)     <!--CMT2X--> BODY3X', 'unsupported_syntax'],
+  // 「殘留」＝基線列的兩類殘留：裸網址後面緊貼的字（網站算進連結，純文字版要印出來），以及被包著網址的括號／強調吞掉的腳註引用（擋下）
+  ['殘留 中文緊貼在裸網址後面', 'BODY1X 詳見https://example.com/a這篇BODY2X文章 BODY3X', null],
+  ['殘留 裸網址後面緊貼中文再接英數', 'https://example.com/p/1BODY1X看完再說 BODY2X', null],
+  ['殘留 英數字緊貼在裸網址後面', 'https://example.com/pBODY1X BODY2X', null],
+  ['殘留 全形括號包裸網址', '（https://example.com/BODY1X） BODY2X', null],
+  ['殘留 全形空白結束網址', 'https://example.com/a　BODY1X BODY2X', null],
+  ['殘留 [網址](網址) 的連結文字不再自動連結', '[https://example.com/pBODY1X](https://example.com/q) BODY2X', null],
+  ['殘留 圖片後括號加強調包 www 網址再接腳註', '![BODY0X](https://example.com/i.png)a(www.example.com**[^1]***) BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
+  ['殘留 角括號網址後的裸網址吞掉腳註', '<https://example.com/q>_https://example.com/p**[^1]** BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
+  ['殘留 強調包網址再接腳註', 'BODY0X **https://example.com**[^1] BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
+  ['殘留 外層不是連結的 ](網址) 吞掉腳註', '[ BODY1X](https://example.com)[_[ BODY2X](https://example.com)*](https://example.com)[^1] BODY3X\n\n[^1]: CMT4X', 'unsupported_syntax'],
+  ['殘留 另有正常引用時被吞的腳註引用也擋', 'BODY0X[^1] **https://example.com**[^1] BODY1X\n\n[^1]: BODY2X', 'unsupported_syntax'],
+  ['殘留 角括號網址後的裸網址接程式碼', 'BODY1X<https://example.com/q>_<https://example.com/q>https://example.com/p![BODY2X](https://example.com/i.png)`CODE3X`_]__--> BODY4X', 'unsupported_syntax'],
+  ['殘留 強調裡的連結後接腳註不擋', 'BODY0X **[BODY1X](https://example.com/a)**[^1] BODY2X\n\n[^1]: BODY3X', null],
+  ['殘留 存檔網址裡的第二個網址不算裸網址', 'BODY0X[存檔](https://web.archive.org/web/1/https://example.com/a)，[BODY1X](https://example.com/b) BODY2X', null],
+  ['殘留 網域裡的 www. 不算裸網址', '[BODY0X](https://app.www.example.com/a)、[BODY1X](https://example.com/b) BODY2X', null],
 ];
 
 test('程式碼裡的 tab 原樣保留（Go、Makefile）', () => {
