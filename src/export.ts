@@ -26,11 +26,21 @@ const LIST_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const CAMPAIGN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
-/** 事件的 detail 不該帶信箱；已存的舊資料也在這裡把信箱形狀的字串遮成 [email]（@頻道 這類不算信箱，原樣保留）。 */
-export function scrubEmails(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
-  const text = JSON.stringify(value);
-  return text.includes('@') ? JSON.parse(text.replace(EMAIL, '[email]')) : value;
+/** 事件的 detail 不該帶信箱：遞迴走訪，只在每個字串值上把信箱形狀的字串遮成 [email]（@頻道 這類不是信箱，原樣保留）。
+ * 不碰 JSON 原文，所以字串裡的跳脫字元（\t、\n、控制字元）後面接信箱也安全；任何情況都不丟例外——
+ * 萬一出事，整個 detail 換成固定標記，事件照樣寫入／匯出。已知限制：像 pkg@1.2.3 的版本號會被誤遮、%40 編碼的信箱不會被遮。 */
+export function scrubEmails(value: unknown, depth = 0): unknown {
+  try {
+    if (typeof value === 'string') return value.includes('@') ? value.replace(EMAIL, '[email]') : value;
+    if (value === null || typeof value !== 'object') return value;
+    if (depth > 20) return '[scrub-depth-limit]';
+    if (Array.isArray(value)) return value.map((v) => scrubEmails(v, depth + 1));
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k.includes('@') ? k.replace(EMAIL, '[email]') : k] = scrubEmails(v, depth + 1);
+    return out;
+  } catch {
+    return { scrub_failed: true };
+  }
 }
 
 const ndjson = (rows: unknown[], next: string | null): Response =>

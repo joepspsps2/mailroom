@@ -40,7 +40,9 @@ and have their own rate bucket (`_export`: 60 per minute, 1000 per day), separat
 - `detail.suspect = "scanner"` marks a click that a security scanner made (see `docs/composing.md`). Keep these rows, do not count them.
 - **`detail.prefetch = true` must be written explicitly by the tracking service** for opens that mail-privacy prefetching made. The user-agent string (`detail.ua`) is only a fallback hint and is not reliable; check a real message end to end once the tracker exists.
 - `detail.linkIndex` / `detail.url` identify the link of a click.
-- Unsubscribes are recorded by the engine itself when someone goes from subscribed to unsubscribed through the unsubscribe page, the one-click endpoint or an unsubscribe mail: `type = "unsubscribe"`, `detail = { via: "link" | "one_click" | "mailto", list, reason? }`. Repeating the request records nothing more.
+- Unsubscribes are recorded by the engine itself when someone goes from subscribed to unsubscribed through the unsubscribe page, the one-click endpoint or an unsubscribe mail: `type = "unsubscribe"`, `detail = { via: "link" | "one_click" | "mailto", list, reason? }`. Repeating the request records nothing more. Unsubscribes made through the list API or a member-centre sync record no event, so a per-issue unsubscribe count only counts people who left from a mail of that issue.
+
+Known limits of the address scrub: version-like strings such as `pkg@1.2.3` are masked too, and addresses written percent-encoded (`%40`) are not. Revisit when links start carrying recipient parameters.
 
 ## Test data
 

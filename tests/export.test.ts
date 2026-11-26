@@ -161,3 +161,36 @@ test('事件 detail 裡的信箱在記錄時與匯出時都被遮掉，@頻道 �
   assert.equal(rows.find((e) => e.provider_event_id === 'legacy-1')!.detail.text, 'bounce for [email]');
   assert.equal(rows.some((e) => JSON.stringify(e).match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[a-z]/)), false);
 });
+
+test('scrubEmails：跳脫字元後接信箱、控制字元、巢狀、非字串值都不丟例外，也不留殘字', async () => {
+  const { scrubEmails } = await import('../src/export.ts');
+  const cases: Array<[unknown, unknown]> = [
+    [{ error: 'Template error:\tfoo@bar.com' }, { error: 'Template error:\t[email]' }],
+    [{ e: 'x\nfoo@bar.com\r\nbaz@qux.org' }, { e: 'x\n[email]\r\n[email]' }],
+    [{ e: '\u0001a@b.co' }, { e: '\u0001[email]' }],
+    [{ a: [{ b: ['q@r.io', 3, null, true] }], n: 5, z: null }, { a: [{ b: ['[email]', 3, null, true] }], n: 5, z: null }],
+    [{ 'k@x.com': 'v' }, { '[email]': 'v' }],
+    ['plain', 'plain'], [null, null], [7, 7],
+    [{ url: 'https://v.example.com/@chan' }, { url: 'https://v.example.com/@chan' }],
+  ];
+  for (const [input, want] of cases) assert.deepEqual(scrubEmails(input), want);
+  const deep: Record<string, unknown> = {};
+  let cur = deep;
+  for (let i = 0; i < 50; i++) { const n: Record<string, unknown> = {}; cur.x = n; cur = n; }
+  assert.doesNotThrow(() => scrubEmails(deep));
+  const cyc: Record<string, unknown> = {}; cyc.self = cyc;
+  assert.doesNotThrow(() => scrubEmails(cyc));
+});
+
+test('事件 detail 帶 tab 後接信箱：照樣寫入（不丟例外）、匯出時信箱已遮', async () => {
+  const f = await buildFixture({ members: 6, issues: 1 });
+  const { ingestEvent } = await import('../src/broadcast/index.ts');
+  const r = await ingestEvent(f.w.db, { provider: 'ses', providerEventId: 'tab-1', type: 'bounce', subtype: 'Permanent', at: '2026-10-05T00:00:00.000Z', campaign: 'weekly-163', contact: '4', detail: { error: 'Template error:\tfoo@bar.com' } }, { now: f.w.now });
+  assert.equal(r, 'recorded');
+  await f.w.db.prepare("INSERT INTO events (provider, provider_event_id, campaign_id, contact_id, type, at, detail) VALUES ('ses', 'legacy-tab', 'weekly-163', 4, 'delay', '2026-10-05T00:00:01.000Z', ?)").bind('{"m":"a\\tb@c.com"}').run();
+  const res = (await exportCall(f.w, 'GET', '/v1/export/events?limit=5000'))!;
+  assert.equal(res.status, 200);
+  const rows = await lines(res);
+  assert.deepEqual(rows.find((e) => e.provider_event_id === 'tab-1')!.detail, { error: 'Template error:\t[email]' });
+  assert.deepEqual(rows.find((e) => e.provider_event_id === 'legacy-tab')!.detail, { m: 'a\t[email]' });
+});
