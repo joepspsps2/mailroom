@@ -108,7 +108,7 @@ export async function makeWorld(opts: WorldOptions = {}) {
   }
 
   async function campaign(id: string, audience: Audience = { waves: [['*']] }, at = clock.t): Promise<void> {
-    const r1 = await saveDraft(db, { id, list: 'weekly', subject: `Issue ${id}`, from: `Weekly <news@${DOMAIN}>`, html: `<p>${id}</p>`, text: id, audience }, { marketingDomain: DOMAIN, now });
+    const r1 = await saveDraft(db, { id, list: 'weekly', subject: `Issue ${id}`, from: `Weekly <news@${DOMAIN}>`, html: `<p>${id}</p>`, text: id, webUrl: `https://www.example.com/issues/${id}`, audience }, { marketingDomain: DOMAIN, now });
     if (!r1.ok) throw new Error(`saveDraft ${r1.reason}`);
     const r2 = await recordPreflight(db, id, { ok: true, issues: [] }, now);
     if (!r2.ok || !r2.preflightOk) throw new Error('preflight');

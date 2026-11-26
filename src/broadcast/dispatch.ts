@@ -9,7 +9,7 @@
 
 import { localDay, parseAddress, suppressedReason } from '../core.ts';
 import type { ListDb } from '../lists.ts';
-import { checkAudience, getCampaign, type Audience, type CampaignRow } from './campaigns.ts';
+import { checkAudience, EXTRA_HEADER, getCampaign, type Audience, type CampaignRow } from './campaigns.ts';
 import { resolveConfig, type BroadcastConfig } from './config.ts';
 import { ingestEvent, type IngestOptions } from './events.ts';
 import { freezeRecipients, type FrozenAudience } from './freeze.ts';
@@ -501,10 +501,19 @@ async function ledgerSend(ctx: Pick<Ctx, 'deps' | 'cfg' | 'now'>, c: CampaignRow
     }
     return { kind: 'rejected', error: `ledger_${existing.status}` };
   }
+  // 個人化之後再檢查一次標頭（render 是可替換的）：只放行允許的名稱、值不准換行。
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(content.headers ?? {})) {
+    if (!EXTRA_HEADER.test(k) || typeof v !== 'string' || /[\r\n]/.test(v) || v.length > 2000) {
+      await db.prepare("UPDATE messages SET status = 'failed', error = 'bad_header', updated_at = ? WHERE id = ?").bind(iso, claimed.id).run();
+      return { kind: 'rejected', error: 'bad_header' };
+    }
+    headers[k] = v;
+  }
   const mail: PostmanMail = {
     from: fmt(from), to: r.email, subject: c.subject, html: content.html, text: content.text,
     ...(replyTo ? { replyTo: fmt(replyTo) } : {}),
-    ...(content.headers && Object.keys(content.headers).length ? { headers: content.headers } : {}),
+    ...(Object.keys(headers).length ? { headers } : {}),
     tags: { campaign: c.id, contact: String(r.contact_id) },
     idempotencyKey: `${ctx.cfg.site}/${key}`,
   };

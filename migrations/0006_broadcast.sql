@@ -48,6 +48,7 @@ CREATE TABLE campaigns (
   html TEXT NOT NULL,
   text TEXT NOT NULL,
   headers TEXT,                        -- JSON: extra headers with placeholders (e.g. List-Unsubscribe), filled per recipient
+  web_url TEXT,                        -- the issue's web version (https), the {{web_url}} placeholder; required before scheduling
   source_ref TEXT,                     -- where the source came from (path and commit)
   status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'scheduled', 'sending', 'paused', 'done', 'cancelled')),
   audience TEXT NOT NULL,              -- JSON: { "plan": "<warm-up plan>" } or { "waves": [["seg", ...], ...], "maxCount": n }

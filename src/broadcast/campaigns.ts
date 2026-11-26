@@ -39,13 +39,15 @@ export interface CampaignInput {
   html: string;
   text: string;
   headers?: Record<string, string>;
+  /** 這期的網頁版網址（https；信裡的 {{web_url}}）。排程前一定要有。 */
+  webUrl?: string;
   sourceRef?: string;
   audience: Audience;
 }
 
 export interface CampaignRow {
   id: string; list_id: string; subject: string; preheader: string | null; from_addr: string; reply_to: string | null;
-  html: string; text: string; headers: string | null; source_ref: string | null; status: CampaignStatus;
+  html: string; text: string; headers: string | null; web_url: string | null; source_ref: string | null; status: CampaignStatus;
   audience: string; audience_resolved: string | null; content_hash: string; approved_hash: string | null;
   approved_at: string | null; approved_note: string | null; preflight: string | null; scheduled_at: string | null;
   started_at: string | null; frozen_at: string | null; last_release_at: string | null; last_progress_at: string | null;
@@ -58,14 +60,15 @@ export type Ok<T = object> = { ok: true } & T;
 export const CAMPAIGN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const LIST_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const SEGMENT = /^[^\u0000-\u001f\u007f]{1,64}$/;
-const HEADER_NAME = /^[A-Za-z][A-Za-z0-9-]{0,63}$/;
+/** 一期信能自帶的標頭：只收退訂兩個標頭、List-Id 與 X- 開頭的（寄件人、收件人、主旨等一律由引擎自己組，不准從這裡帶）。 */
+export const EXTRA_HEADER = /^(?:list-unsubscribe|list-unsubscribe-post|list-id|x-[a-z0-9-]{1,60})$/i;
 const LIMITS = { subject: 300, preheader: 300, html: 400_000, text: 200_000, note: 300, reason: 200, sourceRef: 300 };
 const nowIso = (now?: () => Date) => (now ?? (() => new Date()))().toISOString();
 const ctl = (s: string) => /[\u0000-\u001f\u007f]/.test(s);
 
 /** 讀者看得到的一切（含名單與寄件人）算一個雜湊。 */
-export async function contentHash(c: { list: string; subject: string; preheader?: string | null; from: string; replyTo?: string | null; html: string; text: string; headers?: Record<string, string> | null }): Promise<string> {
-  const raw = JSON.stringify([c.list, c.subject, c.preheader ?? '', c.from, c.replyTo ?? '', c.html, c.text, Object.entries(c.headers ?? {}).sort()]);
+export async function contentHash(c: { list: string; subject: string; preheader?: string | null; from: string; replyTo?: string | null; html: string; text: string; headers?: Record<string, string> | null; webUrl?: string | null }): Promise<string> {
+  const raw = JSON.stringify([c.list, c.subject, c.preheader ?? '', c.from, c.replyTo ?? '', c.html, c.text, Object.entries(c.headers ?? {}).sort(), c.webUrl ?? '']);
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -115,8 +118,9 @@ function checkInput(input: CampaignInput, marketingDomain: string): string | nul
   if (typeof input.text !== 'string' || !input.text || input.text.length > LIMITS.text) return 'bad_text';
   if (input.headers !== undefined) {
     if (!input.headers || typeof input.headers !== 'object' || Array.isArray(input.headers)) return 'bad_headers';
-    for (const [k, v] of Object.entries(input.headers)) if (!HEADER_NAME.test(k) || typeof v !== 'string' || v.length > 2000 || /[\r\n]/.test(v)) return 'bad_headers';
+    for (const [k, v] of Object.entries(input.headers)) if (!EXTRA_HEADER.test(k) || typeof v !== 'string' || v.length > 2000 || /[\r\n]/.test(v)) return 'bad_headers';
   }
+  if (input.webUrl !== undefined && (typeof input.webUrl !== 'string' || input.webUrl.length > 2000 || !/^https:\/\/[^\s<>"]+$/i.test(input.webUrl))) return 'bad_web_url';
   if (input.sourceRef !== undefined && (typeof input.sourceRef !== 'string' || input.sourceRef.length > LIMITS.sourceRef || ctl(input.sourceRef))) return 'bad_source_ref';
   if (!checkAudience(input.audience)) return 'bad_audience';
   return null;
@@ -143,10 +147,10 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   if (!existing) {
     const r = await db
       .prepare(
-        `INSERT INTO campaigns (id, list_id, subject, preheader, from_addr, reply_to, html, text, headers, source_ref, status, audience, content_hash, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
+        `INSERT INTO campaigns (id, list_id, subject, preheader, from_addr, reply_to, html, text, headers, web_url, source_ref, status, audience, content_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
       )
-      .bind(input.id, input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.sourceRef ?? null, audience, hash, t, t)
+      .bind(input.id, input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.webUrl ?? null, input.sourceRef ?? null, audience, hash, t, t)
       .run();
     if ((r.meta.changes ?? 0) === 1) return { ok: true, status: 'draft', changed: true };
     return { ok: false, reason: 'conflict' };
@@ -157,11 +161,11 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   }
   const r = await db
     .prepare(
-      `UPDATE campaigns SET list_id = ?, subject = ?, preheader = ?, from_addr = ?, reply_to = ?, html = ?, text = ?, headers = ?, source_ref = ?, audience = ?,
+      `UPDATE campaigns SET list_id = ?, subject = ?, preheader = ?, from_addr = ?, reply_to = ?, html = ?, text = ?, headers = ?, web_url = ?, source_ref = ?, audience = ?,
          content_hash = ?, status = 'draft', approved_hash = NULL, approved_at = NULL, approved_note = NULL, preflight = NULL, scheduled_at = NULL, updated_at = ?
        WHERE id = ? AND status IN ('draft', 'approved', 'scheduled')`,
     )
-    .bind(input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.sourceRef ?? null, audience, hash, t, input.id)
+    .bind(input.list, input.subject, input.preheader ?? null, input.from, input.replyTo ?? null, input.html, input.text, headers, input.webUrl ?? null, input.sourceRef ?? null, audience, hash, t, input.id)
     .run();
   if ((r.meta.changes ?? 0) !== 1) return { ok: false, reason: 'locked' };
   return { ok: true, status: 'draft', changed: true };
@@ -233,6 +237,7 @@ export async function scheduleCampaign(db: Db, id: string, at: string, now?: () 
   if (c.status !== 'approved') return { ok: false, reason: 'illegal_transition', status: c.status };
   if (c.approved_hash !== c.content_hash) return { ok: false, reason: 'not_approved' };
   if (!preflightPasses(c)) return { ok: false, reason: 'preflight_not_passed' };
+  if (!c.web_url) return { ok: false, reason: 'web_url_required' };
   if (typeof at !== 'string' || Number.isNaN(Date.parse(at))) return { ok: false, reason: 'bad_time' };
   let audience: Audience | null = null;
   try {

@@ -14,7 +14,9 @@ draft ──approve──▶ approved ──schedule──▶ scheduled ──(c
   └── content edited ─┘  └──── unschedule ────┘                 cancelled ◀── (draft / approved / scheduled / paused)
 ```
 
-1. **Draft** — `PUT /v1/campaigns/{id}` with subject, sender, HTML, text, extra headers and the audience. Editing a draft,
+1. **Draft** — `PUT /v1/campaigns/{id}` with subject, sender (must be on `MARKETING_DOMAIN`), HTML, text, the web version
+   URL (`webUrl`, required before scheduling), extra headers (only `List-Unsubscribe`, `List-Unsubscribe-Post`, `List-Id`
+   and `X-…`) and the audience. Editing a draft,
    an approved or a scheduled issue sends it back to `draft` and clears approval and the pre-send check.
    After `sending` the content is locked.
 2. **Pre-send check** — run the compose module's `preflight()` (it needs the network to check links), then
@@ -126,7 +128,8 @@ await ingestEvent(db, { provider, providerEventId, providerMessageId, type, subt
 
 `type` is one of `send`, `delivery`, `bounce` (`subtype` `Permanent…` / `Transient` / `Undetermined`), `complaint`,
 `reject`, `delay`, `open`, `click`, `unsubscribe`. Re-deliveries of the same `providerEventId` are ignored. Without a
-`feedback` hook, permanent bounces and complaints go to the global suppression list.
+`feedback` hook, bounces, complaints and deliveries go through `applyFeedback` (see [docs/unsubscribe.md](unsubscribe.md)).
+An `unsubscribe` event that names an issue unsubscribes the person from that issue's list.
 
 ### The fake postman
 
@@ -153,8 +156,10 @@ short delay. `rules` can make any address answer `temporary`, `permanent`, `thro
 ```
 
 Personalisation per recipient goes through `render(campaign, recipient)`. The Worker default fills the compose
-placeholders and needs unsubscribe links; until those are wired in, every issue pauses with `render_error` instead of
-sending mail without an unsubscribe link.
+placeholders (`{{name}}`, `{{email}}`, `{{web_url}}`, `{{unsubscribe_url}}`, `{{unsubscribe_mailto}}`, also inside the
+headers) with a signed unsubscribe token per recipient (`UNSUB_TOKEN_SECRET`, `UNSUB_BASE_URL`, optional `UNSUB_MAILTO`;
+see [docs/unsubscribe.md](unsubscribe.md)). Without them every issue pauses with `render_error` instead of sending mail
+without an unsubscribe link. Headers produced by a custom `render` are checked against the same allowlist.
 
 ### All settings (`BROADCAST_CONFIG`)
 

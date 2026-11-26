@@ -10,7 +10,7 @@ import {
 } from '../src/broadcast/index.ts';
 
 const input = (id: string, extra: Record<string, unknown> = {}) => ({
-  id, list: 'weekly', subject: 'Hello', from: `Weekly <news@${DOMAIN}>`, html: '<p>hi</p>', text: 'hi', audience: { waves: [['*']] }, ...extra,
+  id, list: 'weekly', subject: 'Hello', from: `Weekly <news@${DOMAIN}>`, html: '<p>hi</p>', text: 'hi', webUrl: 'https://www.example.com/issues/x', audience: { waves: [['*']] }, ...extra,
 });
 
 test('完整一期：開寄→分批交郵差→每人一封→對帳→done', async () => {

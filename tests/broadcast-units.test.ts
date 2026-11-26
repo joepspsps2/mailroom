@@ -121,7 +121,7 @@ test('管理入口：存草稿、記檢查、核准、排程、查進度、節�
   assert.equal(isBroadcastPath('/v1/campaigns/weekly-1'), true);
   assert.equal(isBroadcastPath('/v1/campaigns/Bad_Id'), false);
   assert.equal(isBroadcastPath('/v1/send'), false);
-  const draft = { list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: '<p>x</p>', text: 'x', audience: { waves: [['*']] } };
+  const draft = { list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: '<p>x</p>', text: 'x', webUrl: 'https://www.example.com/i/1', audience: { waves: [['*']] } };
   assert.equal((await call('PUT', '/v1/campaigns/api-1', draft))?.status, 200);
   assert.equal((await call('POST', '/v1/campaigns/api-1/schedule', { at: w.now().toISOString() }))?.status, 409);
   assert.equal((await call('POST', '/v1/campaigns/api-1/preflight', { ok: true, issues: [] }))?.status, 200);
@@ -139,4 +139,88 @@ test('管理入口：存草稿、記檢查、核准、排程、查進度、節�
   assert.equal(((await call('GET', '/v1/warmup/p1'))?.body as { steps: unknown[] }).steps.length, 1);
   assert.equal(await call('DELETE', '/v1/campaigns/api-1'), null);
   assert.equal((await call('POST', '/v1/broadcast/release-hold', { note: 'x' }))?.status, 200);
+});
+
+test('Worker 預設個人化：每位收件人一張退訂券（連結＋一鍵退訂標頭）；沒設退訂鑰匙＝這期暫停、一封都不寄', async () => {
+  const { personalizeRender, unsubLinksFromEnv } = await import('../src/broadcast/worker.ts');
+  const { verifyUnsubToken } = await import('../src/unsub.ts');
+  const secret = 'test-secret-0123456789abcdef';
+  const env = { DB: null as never, UNSUB_TOKEN_SECRET: secret, UNSUB_BASE_URL: 'https://u.example.com', UNSUB_MAILTO: 'unsub@mail.example.com' };
+  const w = await makeWorld({ members: 2, config: { paceMinutes: 1 } });
+  w.deps.render = personalizeRender(unsubLinksFromEnv(env));
+  const { saveDraft, recordPreflight, approveCampaign, scheduleCampaign } = await import('../src/broadcast/index.ts');
+  const opts = { marketingDomain: DOMAIN, now: w.now };
+  await saveDraft(w.db, {
+    id: 'pz-1', list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, webUrl: 'https://www.example.com/i/pz-1',
+    html: '<p>Hi {{#name}}{{name}}{{/name}} <a href="{{unsubscribe_url}}">unsubscribe</a> <a href="{{web_url}}">web</a></p>', text: 'bye {{unsubscribe_url}}',
+    headers: { 'List-Unsubscribe': '<{{unsubscribe_url}}>, <{{unsubscribe_mailto}}>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' },
+    audience: { waves: [['*']] },
+  }, opts);
+  await recordPreflight(w.db, 'pz-1', { ok: true }, w.now);
+  await approveCampaign(w.db, 'pz-1', 'ok', w.now);
+  await scheduleCampaign(w.db, 'pz-1', w.now().toISOString(), w.now);
+  await w.run(5);
+  assert.equal((await w.status('pz-1')).status, 'done');
+  const m = w.postman.accepted[0];
+  const token = /\/u\/([^"\s>]+)/.exec(m.html)![1];
+  const claims = await verifyUnsubToken([secret], token);
+  assert.deepEqual({ list: claims?.list, campaign: claims?.campaign }, { list: 'weekly', campaign: 'pz-1' });
+  assert.ok(m.html.includes('https://www.example.com/i/pz-1'));
+  assert.match(m.headers?.['List-Unsubscribe'] ?? '', /^<https:\/\/u\.example\.com\/u\/.+>, <mailto:unsub@mail\.example\.com\?subject=.+>$/);
+  assert.equal(m.headers?.['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+
+  const w2 = await makeWorld({ members: 2, config: { paceMinutes: 1 } });
+  w2.deps.render = personalizeRender(unsubLinksFromEnv({ DB: null as never }));
+  await w2.campaign('pz-2');
+  await w2.run(3);
+  assert.match((await w2.status('pz-2')).pause_reason ?? '', /^render_error:unsubscribe links not configured/);
+  assert.equal(w2.postman.accepted.length, 0);
+});
+
+test('排程前一定要有網頁版網址', async () => {
+  const w = await makeWorld({ members: 1 });
+  const { saveDraft, recordPreflight, approveCampaign, scheduleCampaign } = await import('../src/broadcast/index.ts');
+  const opts = { marketingDomain: DOMAIN, now: w.now };
+  await saveDraft(w.db, { id: 'nw-1', list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: 'h', text: 't', audience: { waves: [['*']] } }, opts);
+  await recordPreflight(w.db, 'nw-1', { ok: true }, w.now);
+  await approveCampaign(w.db, 'nw-1', 'ok', w.now);
+  assert.deepEqual(await scheduleCampaign(w.db, 'nw-1', w.now().toISOString(), w.now), { ok: false, reason: 'web_url_required' });
+  assert.deepEqual(await saveDraft(w.db, { id: 'nw-2', list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: 'h', text: 't', webUrl: 'http://x.example.com', audience: { waves: [['*']] } }, opts), { ok: false, reason: 'bad_web_url' });
+});
+
+test('事件預設處理＝退訂模組的 applyFeedback：檢舉的人所有名單都退訂', async () => {
+  const w = await makeWorld({ members: 2 });
+  await ingestEvent(w.db, { provider: 'fake', providerEventId: 'cx', type: 'complaint', email: 'r0@example.com', at: w.now().toISOString() });
+  const m = await w.db.prepare("SELECT m.status, m.unsub_source FROM list_members m JOIN contacts c ON c.id = m.contact_id WHERE c.email = 'r0@example.com'").first<Record<string, unknown>>();
+  assert.deepEqual({ ...m }, { status: 'unsubscribed', unsub_source: 'complaint' });
+});
+
+test('一期信自帶的標頭只收允許的名稱（不能夾帶寄件人、收件人、主旨）', async () => {
+  const w = await makeWorld({ members: 1 });
+  const { saveDraft } = await import('../src/broadcast/index.ts');
+  const opts = { marketingDomain: DOMAIN, now: w.now };
+  const base = { list: 'weekly', subject: 'S', from: `news@${DOMAIN}`, html: 'h', text: 't', audience: { waves: [['*']] } };
+  for (const bad of ['Bcc', 'From', 'reply-to', 'Subject', 'Content-Type', 'Return-Path', 'To']) {
+    assert.deepEqual(await saveDraft(w.db, { ...base, id: 'hd-1', headers: { [bad]: 'x@example.com' } }, opts), { ok: false, reason: 'bad_headers' }, bad);
+  }
+  assert.equal((await saveDraft(w.db, { ...base, id: 'hd-1', headers: { 'List-Unsubscribe': '<{{unsubscribe_url}}>', 'List-Id': 'weekly.example.com', 'X-Campaign': 'hd-1' } }, opts)).ok, true);
+  // render 換掉後產生不允許的標頭：寄送端再擋一次，不交郵差、這期暫停
+  w.deps.render = (c) => ({ html: c.html, text: c.text, headers: { Bcc: 'spy@example.com' } });
+  await w.db.prepare("UPDATE campaigns SET web_url = 'https://www.example.com/x' WHERE id = 'hd-1'").run();
+  const { recordPreflight, approveCampaign, scheduleCampaign } = await import('../src/broadcast/index.ts');
+  await recordPreflight(w.db, 'hd-1', { ok: true }, w.now);
+  await approveCampaign(w.db, 'hd-1', 'ok', w.now);
+  await scheduleCampaign(w.db, 'hd-1', w.now().toISOString(), w.now);
+  await w.run(3);
+  assert.equal(w.postman.accepted.length, 0);
+  assert.match((await w.status('hd-1')).pause_reason ?? '', /^rejected:bad_header/);
+});
+
+test('郵差回報的退訂事件：退掉那一期所屬的名單', async () => {
+  const w = await makeWorld({ members: 2, config: { paceMinutes: 1 } });
+  await w.campaign('us-1');
+  await w.run(3);
+  await ingestEvent(w.db, { provider: 'fake', providerEventId: 'u1', type: 'unsubscribe', email: 'r1@example.com', campaign: 'us-1', contact: '2', at: w.now().toISOString() });
+  const m = await w.db.prepare("SELECT m.status FROM list_members m JOIN contacts c ON c.id = m.contact_id WHERE c.email = 'r1@example.com'").first<{ status: string }>();
+  assert.equal(m?.status, 'unsubscribed');
 });

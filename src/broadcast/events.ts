@@ -1,17 +1,16 @@
 // 郵差事件進來的唯一入口：正規化後的 ProviderEvent → events 表＋帳本 last_event＋（可注入的）退信／檢舉處理。
 // 假郵差、之後的 SES（SNS 驗簽後）都呼叫 ingestEvent。同一則事件（provider_event_id）重送只處理一次。
 
-import { addSuppression, type Db } from '../core.ts';
+import type { Db } from '../core.ts';
+import { applyFeedback, type FeedbackEvent } from '../feedback.ts';
+import { listUnsubscribe } from '../lists.ts';
 import { EVENT_TYPES, type ProviderEvent } from './postman.ts';
 
-/** 交給「退信／檢舉怎麼進拒收」那一層的事件（形狀跟退訂模組的回報處理對得上）。 */
-export type FeedbackInput =
-  | { type: 'bounce'; kind: 'permanent' | 'transient'; email: string; campaign?: string | null; source: string; detail?: string | null }
-  | { type: 'complaint'; email: string; source: string; detail?: string | null }
-  | { type: 'delivery'; email: string };
+/** 交給「退信／檢舉怎麼進拒收」那一層的事件（＝退訂模組 feedback.ts 的 FeedbackEvent）。 */
+export type FeedbackInput = FeedbackEvent;
 
 export interface IngestOptions {
-  /** 退信／檢舉／送達的後續處理。沒給＝預設：永久退信進 hard_bounce、檢舉進 complaint（跟 Resend webhook 一樣）。 */
+  /** 退信／檢舉／送達的後續處理。沒給＝預設 applyFeedback（永久退信與檢舉進拒收、檢舉者全部名單退訂、連續暫時退信升級）。 */
   feedback?: (fb: FeedbackInput) => Promise<unknown>;
   now?: () => Date;
 }
@@ -20,11 +19,6 @@ export type IngestOutcome = 'recorded' | 'repeat' | 'rejected';
 
 const LAST_EVENT: Partial<Record<string, string>> = { delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'failed', delay: 'delayed' };
 const ID = /^[\x21-\x7e]{1,200}$/;
-
-async function defaultFeedback(db: Db, fb: FeedbackInput, now: Date): Promise<void> {
-  if (fb.type === 'bounce' && fb.kind === 'permanent') await addSuppression(db, fb.email, 'hard_bounce', fb.source, fb.detail ?? null, now);
-  else if (fb.type === 'complaint') await addSuppression(db, fb.email, 'complaint', fb.source, fb.detail ?? null, now);
-}
 
 /** bounce 的 subtype 只看開頭：Permanent → 永久；其他（Transient、Undetermined）→ 暫時。 */
 export function isPermanentBounce(subtype: string | null | undefined): boolean {
@@ -76,10 +70,16 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
           ? { type: 'complaint', email, source, detail }
           : { type: 'delivery', email };
     if (opts.feedback) await opts.feedback(fb);
-    else await defaultFeedback(db, fb, now);
+    else await applyFeedback(db, fb, { now: () => now });
   }
 
-  // 3. 最後才記這則事件（provider_event_id 唯一：同時兩則一樣的只會留一列）。
+  // 3. 郵差那邊回報的退訂（例：信箱商的退訂按鈕經郵差轉來）：退這一期所屬的名單。對不到期別就只記事件。
+  if (email && ev.type === 'unsubscribe' && campaign) {
+    const c = await db.prepare('SELECT list_id FROM campaigns WHERE id = ?').bind(campaign).first<{ list_id: string }>();
+    if (c) await listUnsubscribe(db, { list: c.list_id, email, source: 'api' }, () => now);
+  }
+
+  // 4. 最後才記這則事件（provider_event_id 唯一：同時兩則一樣的只會留一列）。
   await db
     .prepare(
       `INSERT INTO events (provider, provider_event_id, message_id, provider_message_id, campaign_id, contact_id, type, subtype, at, detail)
