@@ -30,9 +30,10 @@ env.MAILROOM.listStatus({ list, email })                                      //
 env.MAILROOM.listMembers({ list, status?, cursor?, limit? })                  // { members, next }, 1,000 per page
 ```
 
+Each `listMembers` row has `suppressed` (the address is on the global suppression list, same meaning as `listStatus` = `blocked`) and `unsubReason`.
 Bad input returns `{ status: 'rejected', reason }` (`bad_email`, `bad_list`, `unknown_list`, `bad_source`, ...) instead of throwing.
 `listStatus` reports `blocked` for a subscribed member who is on the global suppression list; an unsubscribed member always shows `unsubscribed`.
-`source` for unsubscribe is one of `link`, `one_click`, `api`, `import`, `import-removed`, `complaint` (default `api`).
+`source` for unsubscribe is one of `link`, `one_click`, `mailto`, `api`, `import`, `import-removed`, `complaint` (default `api`).
 
 ## Admin endpoints (bearer `DRILL_TOKEN`, shared admin rate limit)
 

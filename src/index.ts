@@ -6,6 +6,7 @@
 // - 公開網址（workers.dev）：Resend 事後回報 POST /webhooks/resend；
 //   別的 Cloudflare 帳號的站帶自己的鑰匙 POST /v1/send；演習 POST /v1/drill；寄信統計 GET /v1/report；
 //   人工解除拒收 POST /v1/unsuppress。
+// - 退訂：GET／POST /u/{券}、POST /u/{券}/resubscribe；email() 收退訂信。
 // - 名單管理（帶管理口令）：PUT /v1/lists/{id}、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
 // - Queue：Cloudflare 寄信的事後回報（cf-events.ts）。
 // - 排程：有設 cron 時，每次順手清舊計數窗；有設 DAILY_DRILL 時每天最多寄一輪演習信（過了 until 自動停）；有設 LEDGER_RETENTION_DAYS 時清過期帳本列。
@@ -13,7 +14,10 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { bodySizeProblem, checkHttpFrom, limitVar, localDay, lookup, parseAddress, pruneRate, purgeLedger, removeSuppression, retentionDays, send, SUPPRESSION_REASONS, takeRate, TIERS, type SuppressionReason, type CoreDeps, type MessageRow, type RouteTable, type SendRequest, type SendResult, type Tier } from './core.ts';
 import { handleCfEvent } from './cf-events.ts';
-import { importMembers, listMembers, listStatus, listSubscribe, listUnsubscribe, setSegments, upsertList, type ImportOptions, type ImportRow, type SegmentInput, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
+import { listMembers, listStatus, listSubscribe, listUnsubscribe, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
+import { bearer, json, notFound, sameToken } from './http.ts';
+import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
+import { handleUnsubMail, handleUnsubRequest, pageText, unsubscribeLinksForEmail, unsubSecrets, type UnsubHandlerConfig, type UnsubLinks } from './unsub.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
 
@@ -46,6 +50,16 @@ export interface Env {
   RESEND_WEBHOOK_SECRET?: string;
   /** 管理口令（演習、查帳、統計、解除拒收）；沒設＝這些路徑一律 404。 */
   DRILL_TOKEN?: string;
+  /** 退訂券簽章鑰匙（Secret，至少 16 字元）。沒設＝退訂端點回 503。 */
+  UNSUB_TOKEN_SECRET?: string;
+  /** 換鑰匙過渡期：舊鑰匙（逗號分隔），只用來驗證、不簽新券。過了過渡期就拿掉。 */
+  UNSUB_TOKEN_SECRET_PREVIOUS?: string;
+  /** 退訂網址的開頭（https，不含結尾斜線），例 https://u.example.com。 */
+  UNSUB_BASE_URL?: string;
+  /** 收退訂信的地址（Email Routing 轉進本 Worker 的 email()），例 unsubscribe@mail.example.com。 */
+  UNSUB_MAILTO?: string;
+  /** 退訂頁文字（JSON 物件，只寫想改的欄位，見 docs/unsubscribe.md）。 */
+  UNSUB_PAGE?: string | Record<string, unknown>;
   [key: `HTTP_KEY_${string}`]: string | undefined;
 }
 
@@ -53,13 +67,9 @@ export interface Env {
 const DEFAULT_HTTP_RATE_PER_MIN = 60;
 /** 公開網址入口每站每天預設上限。 */
 const DEFAULT_HTTP_DAILY_LIMIT = 2000;
-/** 管理口令入口（演習、查帳、統計、解除拒收）合計上限：口令外洩時，別人拿它也寄不了多少演習信。 */
-const ADMIN_LIMITS = { perMinute: 20, perDay: 200 };
 /** 請求內文上限（位元組，一定要帶 content-length）：寄信 3 MB（內文上限 html 40 萬＋text 20 萬字元，中文 UTF-8 一字 3 bytes）、webhook 256 KB。 */
 const MAX_SEND_BYTES = 3_000_000;
 const MAX_WEBHOOK_BYTES = 256_000;
-/** 名單管理入口的請求內文上限：匯入 2,000 筆、分群 5,000 筆都放得下。 */
-const MAX_LIST_BYTES = 1_500_000;
 
 
 interface DailyDrill { until: string; to: string[]; site?: string; tier?: Tier; routes?: MailRoute[]; utcOffsetHours?: number }
@@ -146,6 +156,15 @@ async function report(env: Env, days: number) {
   return { since, rows: rows.results, suppressions: suppressions.results };
 }
 
+function unsubConfig(env: Env): UnsubHandlerConfig {
+  return {
+    secrets: unsubSecrets(env.UNSUB_TOKEN_SECRET, env.UNSUB_TOKEN_SECRET_PREVIOUS),
+    text: pageText(env.UNSUB_PAGE as string | undefined),
+    // 券驗不過只記 log（不含完整券）；要轉管理員通知，由私有設定的部署包一層。
+    onInvalidToken: (token, via) => console.warn('unsubscribe token rejected', via, token.slice(0, 8)),
+  };
+}
+
 /** 內線入口（RPC）。 */
 export class Mailroom extends WorkerEntrypoint<Env> {
   send(req: SendRequest): Promise<SendResult> {
@@ -170,18 +189,11 @@ export class Mailroom extends WorkerEntrypoint<Env> {
   listMembers(input: { list: string; status?: 'subscribed' | 'unsubscribed'; cursor?: string | null; limit?: number }) {
     return listMembers(this.env.DB, input);
   }
-}
-
-function sameToken(a: string, b: string): boolean {
-  if (!a || !b || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-function bearer(request: Request): string {
-  const m = /^Bearer\s+(.+)$/i.exec(request.headers.get('authorization') ?? '');
-  return m ? m[1].trim() : '';
+  /** 某人的退訂連結與兩個一鍵退訂標頭（url／mailto 對應 compose 的 unsubscribe_url／unsubscribe_mailto）；不是成員＝null。 */
+  async unsubscribeLinks(input: { list: string; email: string; campaign?: string | null }): Promise<UnsubLinks | null> {
+    const cfg = unsubConfig(this.env);
+    return unsubscribeLinksForEmail(this.env.DB, cfg.secrets, { baseUrl: this.env.UNSUB_BASE_URL ?? '', mailtoAddress: this.env.UNSUB_MAILTO }, input);
+  }
 }
 
 /** 帶鑰匙的站：鑰匙決定是哪個站，站名不聽請求本身的。 */
@@ -191,10 +203,6 @@ function clientSite(env: Env, token: string): string | null {
   }
   return null;
 }
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
-const notFound = () => new Response('Not found', { status: 404 });
 
 /** 公開網址查帳只回狀態欄位，不回收件人、寄件人、主旨（口令外洩時不會變成查收件人的工具）。 */
 function publicRow(row: MessageRow | null) {
@@ -257,31 +265,13 @@ export default {
       return json(result, result.status === 'rejected' ? 400 : result.status === 'failed' ? 502 : 200);
     }
 
-    // 名單管理入口（帶管理口令）：PUT /v1/lists/{id}（建立或更新）、POST /v1/lists/{id}/import、POST /v1/lists/{id}/segments。
-    const listPath = /^\/v1\/lists\/([a-z0-9][a-z0-9-]{0,39})(\/import|\/segments)?$/.exec(url.pathname);
-    if (listPath) {
-      const wanted = listPath[2] ? 'POST' : 'PUT';
-      if (request.method !== wanted) return notFound();
-      if (!sameToken(bearer(request), env.DRILL_TOKEN ?? '')) return notFound();
-      const adminOver = await takeRate(env.DB, '_admin', ADMIN_LIMITS);
-      if (adminOver) return new Response('rate limited', { status: 429, headers: { 'retry-after': adminOver === 'day' ? '3600' : '60' } });
-      const size = bodySizeProblem(request.headers.get('content-length'), MAX_LIST_BYTES);
-      if (size) return json({ ok: false, reason: size === 'missing' ? 'length_required' : 'too_large' }, size === 'missing' ? 411 : 413);
-      const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!body || typeof body !== 'object') return json({ ok: false, reason: 'bad_json' }, 400);
-      const id = listPath[1];
-      if (!listPath[2]) {
-        const r = await upsertList(env.DB, { id, name: body.name as string, fromAddr: body.fromAddr as string | undefined, replyTo: body.replyTo as string | undefined, welcomeTemplate: body.welcomeTemplate as string | undefined });
-        return json(r, r.ok ? 200 : 400);
-      }
-      if (listPath[2] === '/segments') {
-        const r = await setSegments(env.DB, id, body.items as SegmentInput[]);
-        return json(r, r.ok ? 200 : r.reason === 'too_many' ? 413 : 400);
-      }
-      const opts: ImportOptions = { importedFrom: body.importedFrom as string, dryRun: body.dryRun === true, expected: body.expected as ImportOptions['expected'] };
-      const r = await importMembers(env.DB, id, body.rows as ImportRow[], opts);
-      return json(r, r.ok ? 200 : r.reason === 'too_many' ? 413 : 400);
-    }
+    // 名單管理入口（帶管理口令）：見 list-routes.ts。
+    const listResponse = await routeLists(request, env.DB, env.DRILL_TOKEN);
+    if (listResponse) return listResponse;
+
+    // 退訂頁與一鍵退訂：GET /u/{券}（確認頁）、POST /u/{券}、POST /u/{券}/resubscribe。
+    const unsubResponse = await handleUnsubRequest(env.DB, unsubConfig(env), request);
+    if (unsubResponse) return unsubResponse;
 
     const postPaths = ['/v1/drill', '/v1/unsuppress'];
     const tokenPaths = [...postPaths, '/v1/lookup', '/v1/report'];
@@ -324,6 +314,12 @@ export default {
         msg.retry();
       }
     }
+  },
+
+  /** 退訂信（Cloudflare Email Routing）：主旨帶退訂券就退訂；沒券的只記 log，由私有設定決定怎麼轉人工。 */
+  async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
+    const outcome = await handleUnsubMail(env.DB, { ...unsubConfig(env), onNoToken: () => console.warn('unsubscribe mail without token') }, { from: message.from, subject: message.headers.get('subject') });
+    console.log('unsubscribe mail', outcome);
   },
 
   /** 試跑期每日演習（DAILY_DRILL）。 */
