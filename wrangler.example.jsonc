@@ -42,7 +42,7 @@
   // Add to "vars": "MARKETING_DOMAIN": "mail.example.com", "NEWSLETTER_POSTMAN": "fake", "NEWSLETTER_MAX_PER_DAY": 3000
   // "queues": {
   //   "producers": [{ "binding": "BROADCAST", "queue": "mailroom-broadcast" }],
-  //   "consumers": [{ "queue": "mailroom-broadcast", "max_batch_size": 10, "max_concurrency": 1, "max_retries": 10 }]
+  //   "consumers": [{ "queue": "mailroom-broadcast", "max_batch_size": 10, "max_concurrency": 1, "max_retries": 10, "dead_letter_queue": "mailroom-broadcast-dlq" }]
   // },
   // and a cron that runs every minute: "triggers": { "crons": ["* * * * *"] }
   // Secrets (always add as Secret, never as a plain variable):

@@ -64,15 +64,18 @@ draft ──approve──▶ approved ──schedule──▶ scheduled ──(c
 | Level | Condition (defaults) | What happens |
 |---|---|---|
 | Wave gate | previous wave's hard bounces ≥ 2% | issue paused before the next wave |
-| Issue brake | ≥ 200 sent in this issue and hard bounces ≥ 4%, or ≥ 3 complaints and ≥ 0.1% | issue paused |
-| Provider | provider reports the account as not `HEALTHY`, or answers "account paused" | issue(s) paused |
+| Issue brake | ≥ 200 sent in this issue and hard bounces ≥ 4%; or ≥ 3 complaints and ≥ 0.1% (no sent minimum: the 3 complaints are the floor) | issue paused |
+| Provider | provider reports the account as not `HEALTHY`, or answers "account paused" | sending issues paused, scheduled issues do not start, queued mails are not handed over |
 | Queue stalled | work handed to the queue but no result for 30 minutes | issue paused |
 | Domain stop | among newsletter mails sent in the last 30 days (and since the last release): ≥ 200 sent and hard bounces ≥ 4% or complaints ≥ 0.08% | **all** newsletters on the domain stop; scheduled issues do not start |
 | Warm-up gate | see below | the ladder does not move up; after 2 failures in a row it locks |
 
 Every brake waits for a person: `POST /v1/campaigns/{id}/resume { note }` (refused while the domain is on hold) and
-`POST /v1/broadcast/release-hold { note }`. After a resume, the issue brake and the wave gate count only mails sent after
-the resume; after a release, the domain rate counts only mails sent after the release. Transactional mail (the "must
+`POST /v1/broadcast/release-hold { note }`. After a resume, **only the brake that paused the issue** (bounce rate,
+complaint rate or wave gate) restarts counting from the resume; every other rate keeps counting the whole issue. After a
+release, the domain rate counts only mails sent after the release. An issue that finishes with failed recipients is
+`done` (they were tried `maxAttempts` times) and raises a yellow alert. Newsletter ledger rows are kept at least 400
+days even if `LEDGER_RETENTION_DAYS` is shorter (de-duplication and the domain rate depend on them). Transactional mail (the "must
 deliver" desk) is not affected by any of this: it uses another sender domain and its own providers.
 
 Alerts (started, paused, finished, blocked) go to the `alert` hook you pass in; the engine does not send them itself.
@@ -150,10 +153,14 @@ short delay. `rules` can make any address answer `temporary`, `permanent`, `thro
 },
 "queues": {
   "producers": [{ "binding": "BROADCAST", "queue": "mailroom-broadcast" }],
-  "consumers": [{ "queue": "mailroom-broadcast", "max_batch_size": 10, "max_concurrency": 1, "max_retries": 10 }]
+  "consumers": [{ "queue": "mailroom-broadcast", "max_batch_size": 10, "max_concurrency": 1, "max_retries": 10, "dead_letter_queue": "mailroom-broadcast-dlq" }]
 },
 "triggers": { "crons": ["* * * * *"] }
 ```
+
+Keep `max_concurrency: 1`: the per-second spacing is applied inside one consumer. Keep a dead-letter queue: send
+messages lost there are re-released after `stuckMinutes`, but provider events (bounces, complaints) are not, and the
+brakes would undercount them. Do not give an HTTP client the same site name as `BROADCAST_CONFIG.site`.
 
 Personalisation per recipient goes through `render(campaign, recipient)`. The Worker default fills the compose
 placeholders (`{{name}}`, `{{email}}`, `{{web_url}}`, `{{unsubscribe_url}}`, `{{unsubscribe_mailto}}`, also inside the

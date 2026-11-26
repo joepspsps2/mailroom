@@ -329,3 +329,94 @@ test('對帳：帳本多一封、送出事件重複、寄出的人對不到帳�
   assert.equal(rec4.ok, true, rec4.problems.join(','));
   assert.equal(rec4.events.awaiting, 4);
 });
+
+// ---- 覆核找到的情境（回歸測試） ----
+
+test('檢舉煞車沒有 200 封下限：150 人裡 3 人檢舉 → 暫停', async () => {
+  const w = await makeWorld({ members: 150, emailOf: (i) => (i >= 20 && i < 23 ? `complaint+${i}@example.com` : `r${i}@example.com`), config: { paceMinutes: 20, domainComplaintRate: 1 } });
+  await w.campaign('cs-1');
+  await w.run(100, { until: async () => (await w.status('cs-1')).status !== 'sending' });
+  const s = await w.status('cs-1');
+  assert.equal(s.status, 'paused');
+  assert.match(s.pause_reason ?? '', /^brake:complaint_rate:3\//);
+});
+
+test('郵差帳號不健康時：排好的期不開寄、一封都不交郵差；恢復健康才開寄', async () => {
+  const w = await makeWorld({ members: 50, config: { paceMinutes: 1, limitsRefreshMinutes: 1 }, postman: { limits: { enforcement: 'PROBATION' } } });
+  await w.campaign('uh-1');
+  await w.run(3);
+  assert.equal((await w.status('uh-1')).status, 'scheduled');
+  assert.equal(w.postman.accepted.length, 0);
+  assert.equal(w.alerts.filter((a) => a.includes('start_blocked_provider_PROBATION:uh-1')).length, 1, '同一個原因只通知一次');
+  w.postman.setLimits({ enforcement: 'HEALTHY' });
+  await w.run(5);
+  assert.equal((await w.status('uh-1')).status, 'done');
+});
+
+test('寄送中帳號轉不健康：已在 Queue 裡的訊息到了也不交郵差', async () => {
+  const w = await makeWorld({ members: 30, config: { paceMinutes: 1, limitsRefreshMinutes: 1 } });
+  await w.campaign('uh-2');
+  await tick(w.deps);
+  w.postman.setLimits({ enforcement: 'SHUTDOWN' });
+  w.clock.t += 61_000;
+  await tick(w.deps); // 讀到新狀態、暫停這期
+  await w.drain();
+  assert.equal(w.postman.accepted.length, 0);
+  assert.match((await w.status('uh-2')).pause_reason ?? '', /^brake:provider_enforcement:SHUTDOWN/);
+});
+
+test('為了無關原因暫停再續寄，分波閘門照算整波（不會拿空樣本過關）', async () => {
+  const w = await makeWorld({ members: 200, segmentOf: (i) => (i < 100 ? 'core' : 'steady'), emailOf: (i) => (i < 10 ? `bounce+${i}@example.com` : `r${i}@example.com`), config: { paceMinutes: 2, brakeHardBounceRate: 1, domainBounceRate: 1 } });
+  await w.campaign('wg-1', { waves: [['core'], ['steady']] });
+  await w.run(5); // 第一波寄完
+  const { pauseCampaign } = await import('../src/broadcast/index.ts');
+  assert.equal((await pauseCampaign(w.db, 'wg-1', 'routine check', w.now)).ok, true);
+  assert.equal((await resume(w, 'wg-1', 'routine check done')).ok, true);
+  await w.run(120, { until: async () => (await w.status('wg-1')).status !== 'sending' });
+  const s = await w.status('wg-1');
+  assert.equal(s.status, 'paused');
+  assert.match(s.pause_reason ?? '', /^brake:wave_gate:wave1:10\/100/);
+  assert.equal(w.postman.accepted.filter((m) => Number(m.tags.contact) > 100).length, 0);
+});
+
+test('分波之間停很久：放出下一波後，消費端晚一點才處理也不會被誤判成 Queue 卡住', async () => {
+  const w = await makeWorld({ members: 40, segmentOf: (i) => (i < 20 ? 'core' : 'steady'), config: { paceMinutes: 1 } });
+  await w.campaign('ws-1', { waves: [['core'], ['steady']] });
+  await w.run(10, { until: async () => (await w.states('ws-1')).done === 20 });
+  // 時間往前走、只跑 tick 不消費：等第二波放出來（上一筆進度已是 60 分鐘前）
+  for (let i = 0; i < 120 && !(await w.states('ws-1')).enqueued; i++) {
+    w.clock.t += 60_000;
+    await tick(w.deps);
+  }
+  assert.ok((await w.states('ws-1')).enqueued > 0, 'wave 2 released');
+  // 第二波剛放出、還沒消費：接下來幾個 tick 不能判卡住
+  for (let i = 0; i < 2; i++) {
+    w.clock.t += 60_000;
+    await tick(w.deps);
+  }
+  assert.deepEqual({ ...(await w.status('ws-1')) }, { status: 'sending', pause_reason: null });
+  await w.run(10, { until: async () => (await w.status('ws-1')).status === 'done' });
+  assert.equal((await w.status('ws-1')).status, 'done');
+});
+
+test('對帳：凍結後名單憑空多一人 → 對不上', async () => {
+  const w = await makeWorld({ members: 3, config: { paceMinutes: 1 } });
+  await w.campaign('fz-1');
+  await w.run(4);
+  assert.equal((await w.status('fz-1')).status, 'done');
+  await w.db.prepare("INSERT INTO campaign_recipients (campaign_id, contact_id, email, state, skip_reason) VALUES ('fz-1', 999, 'ghost@example.com', 'skipped', 'warmup')").run();
+  const rec = await reconcileCampaign(w.db, 'fz-1', resolveConfig());
+  assert.ok(rec.problems.includes('frozen_3_now_4'), rec.problems.join(','));
+});
+
+test('帳本保存天數設很短也不會清掉電子報的帳本列（至少留 400 天）', async () => {
+  const { purgeLedger } = await import('../src/core.ts');
+  const w = await makeWorld({ members: 2, config: { paceMinutes: 1 } });
+  await w.campaign('pg-1');
+  await w.run(3);
+  const later = new Date(w.clock.t + 60 * 86_400_000);
+  await purgeLedger(w.db, 30, later);
+  assert.equal(w.count('messages', "stream = 'marketing'"), 2);
+  await purgeLedger(w.db, 30, new Date(w.clock.t + 401 * 86_400_000));
+  assert.equal(w.count('messages', "stream = 'marketing'"), 0);
+});

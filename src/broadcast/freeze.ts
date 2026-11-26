@@ -82,8 +82,12 @@ export async function freezeRecipients(db: ListDb, c: CampaignRow, aud: FrozenAu
   }
   stmts.push(
     db
-      .prepare("UPDATE campaigns SET frozen_at = ?, audience_resolved = ?, last_progress_at = ?, updated_at = ? WHERE id = ? AND frozen_at IS NULL")
-      .bind(t, JSON.stringify(aud), t, t, c.id),
+      .prepare(
+        `UPDATE campaigns SET frozen_at = ?, audience_resolved = ?, last_progress_at = ?, updated_at = ?,
+           counts = json_set(COALESCE(counts, '{}'), '$.frozen', (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ?))
+         WHERE id = ? AND frozen_at IS NULL`,
+      )
+      .bind(t, JSON.stringify(aud), t, t, c.id, c.id),
   );
   await runBatch(db, stmts);
 }

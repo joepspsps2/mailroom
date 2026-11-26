@@ -150,12 +150,25 @@ function approvedForSending(c: CampaignRow): boolean {
   }
 }
 
-async function startDue(ctx: Ctx, held: boolean): Promise<void> {
+/** 開寄被擋：同一期同一個原因只通知一次（每分鐘都擋，不要每分鐘洗版）。 */
+async function startBlocked(ctx: Ctx, c: CampaignRow, code: string, level: Alert['level'], message: string): Promise<void> {
+  let last: string | undefined;
+  try {
+    last = (JSON.parse(c.counts ?? '{}') as { startBlocked?: string }).startBlocked;
+  } catch {
+    /* 當沒記過 */
+  }
+  if (last === code) return;
+  await setCounts(ctx.deps.db, c.id, 'startBlocked', code, ctx.iso);
+  await emitAlert(ctx, { level, code, campaign: c.id, message });
+}
+
+async function startDue(ctx: Ctx, blocked: string | null): Promise<void> {
   const { db } = ctx.deps;
   const due = (await db.prepare("SELECT * FROM campaigns WHERE status = 'scheduled' AND scheduled_at <= ? ORDER BY scheduled_at, id").bind(ctx.iso).all<CampaignRow>()).results;
   for (const c of due) {
-    if (held) {
-      await emitAlert(ctx, { level: 'yellow', code: 'start_blocked_domain_hold', campaign: c.id, message: `campaign ${c.id} not started: sender domain is on hold` });
+    if (blocked) {
+      await startBlocked(ctx, c, `start_blocked_${blocked}`, 'yellow', `campaign ${c.id} not started: ${blocked}`);
       continue;
     }
     if (!approvedForSending(c)) {
@@ -166,7 +179,7 @@ async function startDue(ctx: Ctx, held: boolean): Promise<void> {
     }
     const aud = await resolveAudience(db, c);
     if ('blocked' in aud) {
-      await emitAlert(ctx, { level: 'red', code: 'start_blocked', campaign: c.id, message: `campaign ${c.id} not started: ${aud.blocked}` });
+      await startBlocked(ctx, c, 'start_blocked', 'red', `campaign ${c.id} not started: ${aud.blocked}`);
       continue;
     }
     const claimed = await db
@@ -255,7 +268,8 @@ async function processSending(ctx: Ctx, c: CampaignRow, budget: Budget, throttle
 
   let counts = await stateCounts(db, c.id);
   // Queue 壞了：有交出去的工作，卻很久沒有任何一封有結果。
-  if (counts.enqueued > 0 && (c.last_progress_at ?? c.started_at ?? ctx.iso) < minutesAgo(ctx.now, cfg.stallMinutes)) {
+  const stallBefore = minutesAgo(ctx.now, cfg.stallMinutes);
+  if (counts.enqueued > 0 && (c.last_progress_at ?? c.started_at ?? ctx.iso) < stallBefore && (c.waiting_since ?? c.started_at ?? ctx.iso) < stallBefore) {
     await brake(ctx, c.id, 'brake:queue_stalled');
     return;
   }
@@ -267,23 +281,26 @@ async function processSending(ctx: Ctx, c: CampaignRow, budget: Budget, throttle
   if (counts.uncertain > 0) await settleUncertain(ctx, c.id);
 
   // 🔴 寄到一半停：本期（續寄過就從續寄起算）已寄夠多封才算比率。
-  const brakeSince = (() => {
+  // 續寄時人工放行過的那一道煞車，從續寄起算；其他煞車照全期算。
+  const ack = (() => {
     try {
-      return (JSON.parse(c.counts ?? '{}') as { brakeSince?: string }).brakeSince ?? null;
+      const o = JSON.parse(c.counts ?? '{}') as { ackBrake?: string | null; brakeSince?: string | null };
+      return { brake: o.ackBrake ?? null, since: o.brakeSince ?? null };
     } catch {
-      return null;
+      return { brake: null, since: null };
     }
   })();
-  const rates = await campaignRates(db, c.id, undefined, brakeSince);
-  if (rates.sent >= cfg.brakeMinSent) {
-    if (rates.hardBounceRate >= cfg.brakeHardBounceRate) {
-      await brake(ctx, c.id, `brake:hard_bounce_rate:${rates.hardBounces}/${rates.sent}`);
-      return;
-    }
-    if (rates.complaints >= cfg.brakeComplaintCount && rates.complaintRate >= cfg.brakeComplaintRate) {
-      await brake(ctx, c.id, `brake:complaint_rate:${rates.complaints}/${rates.sent}`);
-      return;
-    }
+  const sinceFor = (b: string) => (ack.brake === b ? ack.since : null);
+  const bounce = await campaignRates(db, c.id, undefined, sinceFor('hard_bounce_rate'));
+  if (bounce.sent >= cfg.brakeMinSent && bounce.hardBounceRate >= cfg.brakeHardBounceRate) {
+    await brake(ctx, c.id, `brake:hard_bounce_rate:${bounce.hardBounces}/${bounce.sent}`);
+    return;
+  }
+  // 檢舉：件數本身就是下限（≥3 件），不另設寄出封數下限。
+  const complaint = await campaignRates(db, c.id, undefined, sinceFor('complaint_rate'));
+  if (complaint.complaints >= cfg.brakeComplaintCount && complaint.complaintRate >= cfg.brakeComplaintRate) {
+    await brake(ctx, c.id, `brake:complaint_rate:${complaint.complaints}/${complaint.sent}`);
+    return;
   }
 
   counts = await stateCounts(db, c.id);
@@ -297,7 +314,7 @@ async function processSending(ctx: Ctx, c: CampaignRow, budget: Budget, throttle
       const r = await db.prepare("UPDATE campaigns SET status = 'done', finished_at = ?, updated_at = ? WHERE id = ? AND status = 'sending'").bind(ctx.iso, ctx.iso, c.id).run();
       if ((r.meta.changes ?? 0) === 1) {
         ctx.report.finished.push(c.id);
-        await emitAlert(ctx, { level: 'info', code: 'finished', campaign: c.id, message: `campaign ${c.id} done: sent ${rec.sent}, skipped ${rec.skippedTotal}, failed ${rec.failed}` });
+        await emitAlert(ctx, { level: rec.failed > 0 ? 'yellow' : 'info', code: 'finished', campaign: c.id, message: `campaign ${c.id} done: sent ${rec.sent}, skipped ${rec.skippedTotal}, failed ${rec.failed}` });
       }
     } else {
       await brake(ctx, c.id, `reconcile_mismatch:${rec.problems.join(',').slice(0, 150)}`);
@@ -337,8 +354,9 @@ async function processSending(ctx: Ctx, c: CampaignRow, budget: Budget, throttle
         .first<{ t: string | null }>();
       if (prevStart > minutesAgo(ctx.now, cfg.waveGapMinutes)) return;
       if (lastDone?.t && lastDone.t > minutesAgo(ctx.now, cfg.waveGateWaitMinutes)) return;
-      const pr = await campaignRates(db, c.id, prev.w, brakeSince);
-      if (pr.sent > 0 && pr.hardBounceRate >= cfg.waveGateBounceRate) {
+      // 只有「上一次就是被這道閘門停下、人工放行」時才從放行起算（＝放行這一波）；其他情況整波都算。
+      const pr = await campaignRates(db, c.id, prev.w, sinceFor('wave_gate'));
+      if (pr.hardBounceRate >= cfg.waveGateBounceRate) {
         await brake(ctx, c.id, `brake:wave_gate:wave${prev.w}:${pr.hardBounces}/${pr.sent}`);
         return;
       }
@@ -388,7 +406,10 @@ async function processSending(ctx: Ctx, c: CampaignRow, budget: Budget, throttle
   budget.minute -= picked.length;
   budget.day -= picked.length;
   ctx.report.released[c.id] = picked.length;
-  await db.prepare('UPDATE campaigns SET last_release_at = ?, updated_at = ? WHERE id = ?').bind(ctx.iso, ctx.iso, c.id).run();
+  await db
+    .prepare('UPDATE campaigns SET last_release_at = ?, waiting_since = CASE WHEN waiting_since IS NULL OR waiting_since <= COALESCE(last_progress_at, \'\') THEN ? ELSE waiting_since END, updated_at = ? WHERE id = ?')
+    .bind(ctx.iso, ctx.iso, ctx.iso, c.id)
+    .run();
   if (!waveStarts[String(wave)]) {
     waveStarts[String(wave)] = ctx.iso;
     await setCounts(db, c.id, 'waveStarts', waveStarts, ctx.iso);
@@ -429,12 +450,13 @@ export async function tick(deps: BroadcastDeps): Promise<TickReport> {
     for (const c of await sending()) await brake(ctx, c.id, `brake:domain_hold:${hold.reason}`);
   }
 
-  await startDue(ctx, !!hold);
-  if (hold) return ctx.report;
+  const unhealthy = !!throttle.enforcement && throttle.enforcement !== 'HEALTHY' && throttle.enforcement !== 'UNKNOWN';
+  await startDue(ctx, hold ? `domain_hold` : unhealthy ? `provider_${throttle.enforcement}` : null);
+  if (hold || unhealthy) return ctx.report;
 
   // 共用額度：郵差速度（每分鐘）與今天剩餘（自己的上限、郵差 24 小時上限），扣掉已交出去還沒結果的。
   const outstanding = await db
-    .prepare("SELECT COUNT(*) AS n FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id WHERE c.status IN ('sending', 'paused') AND r.state = 'enqueued'")
+    .prepare("SELECT COUNT(*) AS n FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id WHERE c.status = 'sending' AND r.state = 'enqueued'")
     .first<{ n: number }>();
   const out = Number(outstanding?.n ?? 0);
   const sent24 = await db
@@ -577,6 +599,11 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
   if (await activeHold(db, deps.domain)) {
     await backToPlanned();
     return ack('domain_hold');
+  }
+  const health = await db.prepare('SELECT enforcement FROM throttle_days WHERE domain = ? AND day = ?').bind(deps.domain, localDay(now, cfg.utcOffsetHours)).first<{ enforcement: string | null }>();
+  if (health?.enforcement && health.enforcement !== 'HEALTHY' && health.enforcement !== 'UNKNOWN') {
+    await backToPlanned();
+    return ack('provider_unhealthy');
   }
 
   // 派送當下再查一次：凍結之後才退訂、或被拒收的人跳過。

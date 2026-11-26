@@ -48,6 +48,10 @@ export async function reconcileCampaign(db: Db, campaignId: string, cfg: Pick<Br
   }
   if (frozen === 0) problems.push('nothing_frozen');
   if (frozen !== sent + skippedTotal + failed + uncertain + pending) problems.push('counts_do_not_add_up');
+  // 凍結當下記下的人數：之後有人憑空多出來或消失，這裡會對不上。
+  const stored = await db.prepare("SELECT json_extract(counts, '$.frozen') AS n FROM campaigns WHERE id = ?").bind(campaignId).first<{ n: number | null }>();
+  if (stored?.n === null || stored?.n === undefined) problems.push('frozen_count_missing');
+  else if (Number(stored.n) !== frozen) problems.push(`frozen_${stored.n}_now_${frozen}`);
   if (pending > 0) problems.push(`pending:${pending}`);
   if (uncertain > 0) problems.push(`uncertain:${uncertain}`);
 

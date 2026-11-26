@@ -50,7 +50,7 @@ export interface CampaignRow {
   html: string; text: string; headers: string | null; web_url: string | null; source_ref: string | null; status: CampaignStatus;
   audience: string; audience_resolved: string | null; content_hash: string; approved_hash: string | null;
   approved_at: string | null; approved_note: string | null; preflight: string | null; scheduled_at: string | null;
-  started_at: string | null; frozen_at: string | null; last_release_at: string | null; last_progress_at: string | null;
+  started_at: string | null; frozen_at: string | null; last_release_at: string | null; waiting_since: string | null; last_progress_at: string | null;
   finished_at: string | null; pause_reason: string | null; counts: string | null; created_at: string; updated_at: string;
 }
 
@@ -274,12 +274,15 @@ export async function resumeCampaign(db: Db, id: string, note: string, opts: { m
   const hold = await db.prepare('SELECT reason FROM domain_holds WHERE domain = ? AND released_at IS NULL LIMIT 1').bind(opts.marketingDomain).first<{ reason: string }>();
   if (hold) return { ok: false, reason: 'domain_held' };
   // 「最後進度」順便更新：不然暫停很久之後一續寄，就被當成 Queue 卡住。
-  // 煞車比率從續寄這一刻重新起算（brakeSince）：人查過、放行了，暫停前的那批不再拿來立刻又踩一次。
+  // 只有「讓這期停下來的那一道煞車」從續寄這一刻重新起算（ackBrake＋brakeSince）：人查過的就是那一項。
+  // 為了別的原因暫停（人工、Queue 卡住、對帳…）再續寄，比率照舊全部算，不會被清零。
+  const c = await getCampaign(db, id);
+  const m = /^brake:(hard_bounce_rate|complaint_rate|wave_gate)\b/.exec(c?.pause_reason ?? '');
   const t = nowIso(opts.now);
   return move(
     db, id, ['paused'], 'sending',
-    "pause_reason = NULL, last_progress_at = ?, counts = json_set(COALESCE(counts, '{}'), '$.lastResumeNote', ?, '$.brakeSince', ?)",
-    [t, n, t], opts.now,
+    "pause_reason = NULL, last_progress_at = ?, waiting_since = NULL, counts = json_set(COALESCE(counts, '{}'), '$.lastResumeNote', ?, '$.ackBrake', ?, '$.brakeSince', ?)",
+    [t, n, m ? m[1] : null, m ? t : null], opts.now,
   );
 }
 

@@ -62,6 +62,7 @@ CREATE TABLE campaigns (
   started_at TEXT,
   frozen_at TEXT,                      -- set in the same batch that writes campaign_recipients
   last_release_at TEXT,
+  waiting_since TEXT,                  -- first release after the last progress (queue-stall detection)
   last_progress_at TEXT,
   finished_at TEXT,
   pause_reason TEXT,

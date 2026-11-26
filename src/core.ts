@@ -240,11 +240,15 @@ export function retentionDays(v: unknown): number | null {
  * 「正在寄」的列不動；拒收名單不清（那是防線不是紀錄）。一次最多清 limit 列，沒清完下一輪排程接著清。
  * 回傳實際刪掉的列數。
  */
+/** 電子報的帳本列至少留這麼多天（去重與網域滾動比率都靠它；保存天數設得再短也不清）。 */
+export const MIN_MARKETING_RETENTION_DAYS = 400;
+
 export async function purgeLedger(db: Db, days: number, now = new Date(), limit = 5000): Promise<{ messages: number; webhookEvents: number }> {
   const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
+  const marketingCutoff = new Date(now.getTime() - Math.max(days, MIN_MARKETING_RETENTION_DAYS) * 86_400_000).toISOString();
   const m = await db
-    .prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE created_at < ? AND status != 'sending' ORDER BY id LIMIT ?)")
-    .bind(cutoff, limit)
+    .prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE created_at < ? AND status != 'sending' AND (stream != 'marketing' OR created_at < ?) ORDER BY id LIMIT ?)")
+    .bind(cutoff, marketingCutoff, limit)
     .run();
   const w = await db
     .prepare('DELETE FROM webhook_events WHERE id IN (SELECT id FROM webhook_events WHERE received_at < ? LIMIT ?)')
