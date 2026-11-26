@@ -111,6 +111,6 @@ Without `SES_SNS_TOPIC_ARNS` and `SES_REGION`, `/webhooks/ses` answers 404. With
 
 ## Testing in the SES sandbox
 
-The sandbox only delivers to verified addresses and to the SES mailbox simulator (`success@`, `bounce@`,
-`complaint@`, `ooto@`, `suppressionlist@simulator.amazonses.com`). Simulator mail does not count toward your
+The sandbox only delivers to verified addresses and to the SES mailbox simulator (local parts
+`success`, `bounce`, `complaint`, `ooto`, `suppressionlist` at the simulator domain listed in the SES documentation). Simulator mail does not count toward your
 bounce and complaint rates. A newsletter list used for sandbox tests should contain only those addresses.

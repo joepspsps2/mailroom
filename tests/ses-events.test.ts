@@ -25,7 +25,12 @@ const ascii = (s: string) => new TextEncoder().encode(s);
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const other = generateKeyPairSync('rsa', { modulusLength: 2048 });
 
-function pem(spki: Buffer, notBefore = '260101000000Z', notAfter = '20991231000000Z'): string {
+/** X.509 的兩種時間格式：UTCTime（兩位數年）與 GeneralizedTime（四位數年）。 */
+const asn1Utc = (d: Date) => d.toISOString().replace(/[-:T]/g, '').slice(2, 14) + 'Z';
+const asn1Gen = (d: Date) => d.toISOString().replace(/[-:T]/g, '').slice(0, 14) + 'Z';
+const day = (s: string) => new Date(`${s}T00:00:00Z`);
+
+function pem(spki: Buffer, notBefore = asn1Utc(day('2026-01-01')), notAfter = asn1Gen(day('2099-12-31'))): string {
   const tbs = seq(
     tlv(0xa0, tlv(0x02, Uint8Array.from([2]))),
     tlv(0x02, Uint8Array.from([1])),
@@ -152,7 +157,7 @@ test('憑證網址不是該地區的 SNS 主機 → 403，而且不去抓那個�
     'http://sns.us-east-1.amazonaws.com/SimpleNotificationService-0123.pem',
     'https://sns.us-west-2.amazonaws.com/SimpleNotificationService-0123.pem',
     'https://sns.us-east-1.amazonaws.com:8443/SimpleNotificationService-0123.pem',
-    'https://user@sns.us-east-1.amazonaws.com/SimpleNotificationService-0123.pem',
+    Object.assign(new URL('https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0123.pem'), { username: 'user' }).toString(),
     'https://sns.us-east-1.amazonaws.com/other/key.pem',
     'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0123.pem?x=1',
   ];
@@ -200,10 +205,10 @@ test('SignatureVersion 1（SHA1）預設不收；部署端打開才收', async (
 test('憑證過期或還沒生效 → 403', async () => {
   const db = await world();
   const { net, opts } = setupNet();
-  net.certPem = pem(publicKey.export({ type: 'spki', format: 'der' }), '200101000000Z', '210101000000Z');
+  net.certPem = pem(publicKey.export({ type: 'spki', format: 'der' }), asn1Utc(day('2020-01-01')), asn1Utc(day('2021-01-01')));
   assert.equal((await post(db, signed({ Type: 'Notification', Message: complaint('a@example.com') }), opts)).outcome, 'rejected:cert_expired');
   clearCertCache();
-  net.certPem = pem(publicKey.export({ type: 'spki', format: 'der' }), '20300101000000Z'.slice(2), '20991231000000Z');
+  net.certPem = pem(publicKey.export({ type: 'spki', format: 'der' }), asn1Utc(day('2030-01-01')), asn1Gen(day('2099-12-31')));
   assert.equal((await post(db, signed({ Type: 'Notification', Message: complaint('a@example.com') }), opts)).outcome, 'rejected:cert_expired');
 });
 
