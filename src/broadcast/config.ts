@@ -96,6 +96,8 @@ export const DEFAULT_BROADCAST_CONFIG: Readonly<BroadcastConfig> = Object.freeze
 });
 
 const SITE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** 「下限」類設定的上限：設太大等於把那道煞車關掉，超過就當寫錯、用預設值（並在 log 留一行）。 */
+const MAX_VALUE: Partial<Record<keyof BroadcastConfig, number>> = { domainMinComplaints: 10, waveGateMinSent: 100, startGraceMinutes: 2880 };
 
 /**
  * 合併設定：只收「型別對、數值合理」的欄位，其他一律用預設值（寫錯不能變成「不設防」）。
@@ -123,6 +125,11 @@ export function resolveConfig(over?: Partial<BroadcastConfig> | string | null): 
     if (typeof n !== 'number' || !Number.isFinite(n)) continue;
     const isRate = key.endsWith('Rate') || key === 'rateFactor' || key === 'gateOpenDrop';
     if (isRate ? n < 0 || n > 1 : key === 'utcOffsetHours' ? n < -14 || n > 14 : n <= 0) continue;
+    const cap = MAX_VALUE[key];
+    if (cap !== undefined && n > cap) {
+      console.error(`broadcast config ${key} above ${cap}: using the default`);
+      continue;
+    }
     (out as unknown as Record<string, number>)[key] = n;
   }
   return out;

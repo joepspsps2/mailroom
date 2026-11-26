@@ -42,7 +42,7 @@ test('② 分波閘門樣本下限：waveGateMinSent 高於上一波寄出數 �
   assert.match((await strict.status('g-2')).pause_reason ?? '', /^brake:wave_gate:wave1:1\/30/, '預設：1 封退信（3.3%）就停');
 });
 
-test('③ 郵差不健康很久之後恢復：過了原定時間超過 startGraceMinutes → 退回已核准、不自動開寄；寬限內照常開寄', async () => {
+test('③ 郵差不健康很久之後恢復：過了原定時間超過 startGraceMinutes → 退回草稿、不自動開寄；寬限內照常開寄', async () => {
   const w = await makeWorld({ members: 20, config: { paceMinutes: 1, limitsRefreshMinutes: 1, startGraceMinutes: 120 }, postman: { limits: { enforcement: 'PROBATION' } } });
   await w.campaign('st-1');
   await w.run(3);
@@ -50,7 +50,10 @@ test('③ 郵差不健康很久之後恢復：過了原定時間超過 startGrac
   w.postman.setLimits({ enforcement: 'HEALTHY' });
   w.clock.t += 3 * 3_600_000; // 過了 3 小時才恢復
   await w.run(5);
-  assert.equal((await w.status('st-1')).status, 'approved');
+  assert.equal((await w.status('st-1')).status, 'draft', '退回草稿：要重新核准');
+  const row = await w.db.prepare('SELECT approved_hash, approved_note, counts FROM campaigns WHERE id = ?').bind('st-1').first<any>();
+  assert.deepEqual([row.approved_hash, row.approved_note], [null, null]);
+  assert.equal(row.counts?.includes('previewHash') ?? false, false, '預覽記號也清掉');
   assert.equal(w.postman.accepted.length, 0, '一封都沒寄');
   assert.ok(w.alerts.some((a) => a.startsWith('yellow:start_stale:st-1')));
   // 寬限內：晚 30 分鐘恢復照常開寄
@@ -67,9 +70,9 @@ test('④ 同一份內容不能用不同期號建兩次（網頁版網址／原�
   const w = await makeWorld({ members: 1 });
   const opts = { marketingDomain: DOMAIN, now: w.now };
   assert.equal((await saveDraft(w.db, { id: 'a-1', ...ADD({ webUrl: 'https://www.example.com/p/1', sourceRef: 'posts/a.md@abc' }) }, opts)).ok, true);
-  assert.deepEqual(await saveDraft(w.db, { id: 'a-2', ...ADD({ subject: 'other', webUrl: 'https://www.example.com/p/1' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1' });
-  assert.deepEqual(await saveDraft(w.db, { id: 'a-3', ...ADD({ subject: 'other', webUrl: 'https://www.example.com/p/3', sourceRef: 'posts/a.md@abc' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1' });
-  assert.deepEqual(await saveDraft(w.db, { id: 'a-4', ...ADD({ webUrl: 'https://www.example.com/p/4' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1' }, 'same body, different url');
+  assert.deepEqual(await saveDraft(w.db, { id: 'a-2', ...ADD({ subject: 'other', webUrl: 'https://www.example.com/p/1' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1', twinStatus: 'draft', twinBy: 'web_url' });
+  assert.deepEqual(await saveDraft(w.db, { id: 'a-3', ...ADD({ subject: 'other', html: '<p>z</p>', text: 'z', webUrl: 'https://www.example.com/p/3', sourceRef: 'posts/a.md@abc' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1', twinStatus: 'draft', twinBy: 'source_ref' });
+  assert.deepEqual(await saveDraft(w.db, { id: 'a-4', ...ADD({ webUrl: 'https://www.example.com/p/4' }) }, opts), { ok: false, reason: 'duplicate_content', twin: 'a-1', twinStatus: 'draft', twinBy: 'content' }, 'same body, different url');
   // 自己改自己不算重複
   assert.equal((await saveDraft(w.db, { id: 'a-1', ...ADD({ subject: 'edited', webUrl: 'https://www.example.com/p/1', sourceRef: 'posts/a.md@abc' }) }, opts)).ok, true);
   // 取消後同一份內容可以再建
@@ -192,3 +195,77 @@ test('⑤ 退訂告警：額度滿時寫入失敗那種照送；時間窗結束�
 });
 
 void approveCampaign;
+
+test('必修1：郵差上限讀不到時不開寄（留在 scheduled）；過了寬限退回草稿；恢復後不會自動全寄', async () => {
+  const w = await makeWorld({ members: 20, config: { paceMinutes: 1, limitsRefreshMinutes: 1, startGraceMinutes: 120 } });
+  const real = w.postman.limits.bind(w.postman);
+  w.postman.limits = async () => { throw new Error('api down'); };
+  await w.campaign('un-1');
+  await w.run(5);
+  assert.equal((await w.status('un-1')).status, 'scheduled', '讀不到上限＝不開寄、不凍結名單');
+  assert.equal(w.count('campaign_recipients'), 0);
+  assert.ok(w.alerts.some((a) => a.includes('start_blocked_provider_unreachable:un-1')));
+  w.clock.t += 3 * 24 * 3_600_000; // 三天後才恢復
+  w.postman.limits = real;
+  await w.run(5);
+  assert.equal((await w.status('un-1')).status, 'draft');
+  assert.equal(w.postman.accepted.length, 0, '恢復後也沒有自動寄出');
+});
+
+test('必修1：已開寄但超過寬限一封都沒交出去 → 暫停 brake:start_stale；放行後重新起算、之後照常寄', async () => {
+  const w = await makeWorld({ members: 10, config: { paceMinutes: 1, limitsRefreshMinutes: 1, startGraceMinutes: 30 } });
+  await w.campaign('ss-1');
+  await w.run(1);
+  assert.equal((await w.status('ss-1')).status, 'sending');
+  // 模擬開寄後什麼都沒交出去：把進度、待放水的人退回原狀
+  await w.db.prepare("UPDATE campaign_recipients SET state = 'planned', enqueued_at = NULL, done_at = NULL WHERE campaign_id = 'ss-1'").run();
+  await w.db.prepare("UPDATE campaigns SET last_progress_at = ? WHERE id = 'ss-1'").bind(new Date(w.clock.t - 40 * 60_000).toISOString()).run();
+  w.postman.limits = async () => { throw new Error('api down'); };
+  w.clock.t += 5 * 60_000;
+  await w.db.prepare("UPDATE throttle_days SET refreshed_at = NULL").run();
+  await w.run(2);
+  const s = await w.status('ss-1');
+  assert.equal(s.status, 'paused');
+  assert.equal(s.pause_reason, 'brake:start_stale');
+  const ex = explainPause(s.pause_reason, resolveConfig({}))!;
+  assert.deepEqual([ex.code, ex.resumable], ['start_stale', true]);
+});
+
+test('建議4：permanent_streak 是設定問題，不能直接續寄', () => {
+  const ex = explainPause('brake:permanent_streak:5', resolveConfig({}))!;
+  assert.deepEqual([ex.code, ex.resumable], ['permanent_streak', false]);
+});
+
+test('建議5：網址正規化（斜線、大小寫、utm、片段）也算重複；寄完的舊期不擋「同原稿路徑」的新一期，但擋同網址', async () => {
+  const w = await makeWorld({ members: 1 });
+  const opts = { marketingDomain: DOMAIN, now: w.now };
+  await saveDraft(w.db, { id: 'n-1', ...ADD({ webUrl: 'https://www.example.com/p/9', sourceRef: 'posts/latest.md' }) }, opts);
+  for (const [i, u] of ['https://WWW.example.com/p/9/', 'https://www.example.com/p/9?utm_source=x#top', 'https://www.example.com/p/9//'].entries()) {
+    const r = await saveDraft(w.db, { id: `n-x${i}`, ...ADD({ subject: 'other', html: `<p>${i}</p>`, text: `t${i}`, webUrl: u }) }, opts);
+    assert.deepEqual([r.ok, (r as any).twinBy], [false, 'web_url'], u);
+  }
+  assert.equal((await saveDraft(w.db, { id: 'n-ok', ...ADD({ html: '<p>other</p>', text: 'o', webUrl: 'https://www.example.com/p/9?page=2' }) }, opts)).ok, true, '不同查詢字串是不同頁');
+  await w.db.prepare("UPDATE campaigns SET status = 'done' WHERE id = 'n-1'").run();
+  assert.equal((await saveDraft(w.db, { id: 'n-2', ...ADD({ html: '<p>new</p>', text: 'n', webUrl: 'https://www.example.com/p/10', sourceRef: 'posts/latest.md' }) }, opts)).ok, true, '同原稿路徑、舊期已寄完：允許');
+  const same = await saveDraft(w.db, { id: 'n-3', ...ADD({ html: '<p>again</p>', text: 'a', webUrl: 'https://www.example.com/p/9' }) }, opts);
+  assert.deepEqual([same.ok, (same as any).twinStatus], [false, 'done'], '同網址仍擋，並回報對方已寄完');
+});
+
+test('建議8：下限類設定設太大（等於關掉煞車）不收，回預設', () => {
+  const c = resolveConfig({ domainMinComplaints: 11, waveGateMinSent: 101, startGraceMinutes: 100000 });
+  assert.deepEqual([c.domainMinComplaints, c.waveGateMinSent, c.startGraceMinutes], [1, 1, 360]);
+  const ok = resolveConfig({ domainMinComplaints: 10, waveGateMinSent: 100, startGraceMinutes: 2880 });
+  assert.deepEqual([ok.domainMinComplaints, ok.waveGateMinSent, ok.startGraceMinutes], [10, 100, 2880]);
+});
+
+test('測試信的事件：記下，但不進拒收名單、不退訂、不算統計', async () => {
+  const w = await makeWorld({ members: 3 });
+  const { ingestEvent } = await import('../src/broadcast/index.ts');
+  await w.campaign('te-1');
+  for (const [i, type, subtype] of [[1, 'bounce', 'Permanent'], [2, 'complaint', null]] as const) {
+    await ingestEvent(w.db, { provider: 'ses', providerEventId: `t-${i}`, type, subtype, at: w.now().toISOString(), email: 'qa-box@example.com', campaign: 'te-1', contact: 'test' });
+  }
+  assert.equal(w.count('suppressions', "email = 'qa-box@example.com'"), 0);
+  assert.equal(w.count('events', "provider_event_id LIKE 't-%'"), 2);
+  assert.equal(w.count('events', "contact_id IS NOT NULL AND provider_event_id LIKE 't-%'"), 0);
+});

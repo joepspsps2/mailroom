@@ -67,7 +67,9 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
   if (last && msg) await db.prepare('UPDATE messages SET last_event = ?, updated_at = ? WHERE id = ?').bind(last, now.toISOString(), msg.id).run();
 
   // 2. 退信／檢舉／送達的後續處理（進拒收名單等）。
-  if (email && !ev.skipFeedback && (ev.type === 'bounce' || ev.type === 'complaint' || ev.type === 'delivery')) {
+  // 測試信（tags.contact＝test）：事件照記，但不進拒收名單、不退訂任何人（測試信箱被標垃圾信不該影響名單）；統計只算凍結名單裡的人，本來就不含它。
+  const isTest = ev.contact === 'test';
+  if (!isTest && email && !ev.skipFeedback && (ev.type === 'bounce' || ev.type === 'complaint' || ev.type === 'delivery')) {
     const source = `${ev.provider}-event`;
     const detail = ev.detail && typeof ev.detail === 'object' ? JSON.stringify(ev.detail).slice(0, 300) : null;
     const fb: FeedbackInput =
@@ -87,7 +89,7 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
   }
 
   // 3. 郵差那邊回報的退訂（例：信箱商的退訂按鈕經郵差轉來）：退這一期所屬的名單。對不到期別就只記事件。
-  if (email && ev.type === 'unsubscribe' && campaign) {
+  if (!isTest && email && ev.type === 'unsubscribe' && campaign) {
     const c = await db.prepare('SELECT list_id FROM campaigns WHERE id = ?').bind(campaign).first<{ list_id: string }>();
     if (c) await listUnsubscribe(db, { list: c.list_id, email, source: 'api' }, () => now);
   }

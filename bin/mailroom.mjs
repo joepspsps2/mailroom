@@ -5,7 +5,15 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { runCli } from '../src/cli/main.ts';
+// 裝成套件時用建置好的 JS（dist）：Node 不替 node_modules 裡的 .ts 去除型別。在原始碼資料夾裡開發時沒有 dist，直接用 .ts。
+let main;
+try {
+  main = await import('../dist/cli/main.js');
+} catch (e) {
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
+  main = await import('../src/cli/main.ts');
+}
+const { runCli } = main;
 
 const argv = process.argv.slice(2);
 let cfgPath = process.env.MAILROOM_CONFIG;

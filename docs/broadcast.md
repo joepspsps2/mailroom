@@ -111,7 +111,7 @@ once. Open rate = people with an open event ÷ (sent − hard bounces).
 - `GET /v1/campaigns/{id}` — state, approval, pre-send check, recipients by state/reason/wave, rates (no content, no addresses).
 - `GET /v1/campaigns/{id}/audience` — who would receive it if it started now: per wave and segment, and how many are skipped (suppressed, not in this warm-up step). Read-only.
 - `GET /v1/campaigns/{id}/preview` — the issue filled in for a sample reader (and a reader without a name), the pre-send check detail. `POST` does the same and marks this exact content as previewed; **approval over HTTP is refused (`preview_required`) until it has been**, and any edit invalidates it.
-- `POST /v1/campaigns/{id}/test { to: [...], subjectPrefix? }` — real postman, real headers, one mail per address, **only to addresses listed in `TEST_RECIPIENTS`** (at most 10 per call), subject prefixed. Not in the frozen list, not in the ledger, not counted anywhere. Refused while the domain is on hold. A postman error that leaves the outcome unknown is reported as `unknown_outcome` and never retried.
+- `POST /v1/campaigns/{id}/test { to: [...], subjectPrefix? }` — real postman, real headers, one mail per address, **only to addresses listed in `TEST_RECIPIENTS`** (at most 10 per call), subject prefixed. Not in the frozen list, not in the ledger, not counted anywhere. The provider's events for a test mail (tag `contact=test`) are recorded but never suppress an address or unsubscribe anyone, so a test mailbox that bounces or marks the mail as spam changes nothing on the list; still, send test mail only to mailboxes you own and have confirmed receive mail. Refused while the domain is on hold. A postman error that leaves the outcome unknown is reported as `unknown_outcome` and never retried.
 - The status answer includes `pauseExplain` for a paused issue: the code, a one-line summary, the numerator and denominator at the time, the threshold, whether the domain hold must be released first, whether a plain resume makes sense, and the suggested next step.
 - `GET /v1/throttle` — today's cap and usage, provider speed and health, domain hold, issues in flight.
 
@@ -185,13 +185,15 @@ without an unsubscribe link. Headers produced by a custom `render` are checked a
 | `waveGapMinutes` / `waveGateWaitMinutes` / `waveGateBounceRate` | 60 / 30 / 0.02 | wave timing and gate |
 | `brakeMinSent` / `brakeHardBounceRate` / `brakeComplaintCount` / `brakeComplaintRate` | 200 / 0.04 / 3 / 0.001 | issue brake |
 | `domainWindowDays` / `domainMinSent` / `domainBounceRate` / `domainComplaintRate` | 30 / 200 / 0.04 / 0.0008 | domain stop |
-| `domainMinComplaints` | 1 | complaints in the window needed (besides the rate) to stop the domain. 1 = no extra floor: with a small sample a single complaint can cross 0.08% (1 of 220 is 0.45%). Decide before the first real send whether to raise it |
-| `waveGateMinSent` | 1 | mails the previous wave must have sent before its bounce rate is judged. With 30-person waves one bounce is 3.3%, over the 2% gate |
-| `startGraceMinutes` | 360 | a scheduled issue more than this many minutes past its time (provider unhealthy, domain on hold, Worker down) goes back to `approved` with a yellow alert `start_stale` instead of starting late; schedule it again after checking |
+| `domainMinComplaints` | 1 (max 10) | complaints in the window needed (besides the rate) to stop the domain. 1 = no extra floor: with a small sample a single complaint can cross 0.08% (1 of 220 is 0.45%). Decide before the first real send whether to raise it |
+| `waveGateMinSent` | 1 (max 100) | mails the previous wave must have sent before its bounce rate is judged. With 30-person waves one bounce is 3.3%, over the 2% gate |
+| `startGraceMinutes` | 360 (max 2880) | a scheduled issue more than this many minutes past its time (provider unhealthy or unreachable, domain on hold, Worker down) goes back to **`draft`** (approval and preview are cleared) with a yellow alert `start_stale` instead of starting late: look at it again, approve it again, schedule it again. An issue that did start but handed **no mail at all** to the provider for this long is paused (`brake:start_stale`) |
 | `stuckMinutes` / `stallMinutes` | 10 / 30 | re-release / queue-stalled brake |
 | `maxAttempts` / `throttleRetrySeconds` | 3 / 30 | temporary failures / throttling |
 | `utcOffsetHours` | 8 | which local day the daily cap uses |
 | `limitsRefreshMinutes` | 60 | how often provider limits and health are read |
 | `gateWaitHours` / `gateBounceRate` / `gateComplaintRate` / `gateOpenDrop` / `gateMaxFails` | 72 / 0.02 / 0.001 / 0.05 / 2 | warm-up gate |
 
-Invalid values fall back to the default; they never switch a check off.
+Invalid values fall back to the default; they never switch a check off. The three settings above also have a ceiling (a floor set absurdly high would switch the brake off): a larger value is ignored and the default is used, with a line in the log.
+
+When the provider's limits cannot be read (bad key, API down) the engine does **not** start scheduled issues (`start_blocked_provider_unreachable`): they stay `scheduled` until the limits can be read again, or until `startGraceMinutes` passes and they go back to `draft`.

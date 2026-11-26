@@ -175,8 +175,12 @@ async function startDue(ctx: Ctx, blocked: string | null): Promise<void> {
   for (const c of due) {
     // 過了原定時間太久（等了很久才輪到開寄）：不自動開寄，退回已核准，由人確認現在寄還適不適合再重排。
     if (Date.parse(c.scheduled_at ?? '') < ctx.now.getTime() - ctx.cfg.startGraceMinutes * 60_000) {
-      const back = await db.prepare("UPDATE campaigns SET status = 'approved', scheduled_at = NULL, updated_at = ? WHERE id = ? AND status = 'scheduled'").bind(ctx.iso, c.id).run();
-      if ((back.meta.changes ?? 0) === 1) await emitAlert(ctx, { level: 'yellow', code: 'start_stale', campaign: c.id, message: `campaign ${c.id} was due at ${c.scheduled_at} and could not start within ${ctx.cfg.startGraceMinutes} minutes: moved back to approved, schedule it again after checking` });
+      // 退回草稿（核准與預覽記號一併清掉）：延誤這麼久的內容可能已經不合時宜，要重新看過、重新核准。
+      const back = await db
+        .prepare("UPDATE campaigns SET status = 'draft', scheduled_at = NULL, approved_hash = NULL, approved_at = NULL, approved_note = NULL, counts = json_remove(COALESCE(counts, '{}'), '$.previewHash', '$.previewAt'), updated_at = ? WHERE id = ? AND status = 'scheduled'")
+        .bind(ctx.iso, c.id)
+        .run();
+      if ((back.meta.changes ?? 0) === 1) await emitAlert(ctx, { level: 'yellow', code: 'start_stale', campaign: c.id, message: `campaign ${c.id} was due at ${c.scheduled_at} and could not start within ${ctx.cfg.startGraceMinutes} minutes: moved back to draft, look at it again, approve it again and schedule it again` });
       continue;
     }
     if (blocked) {
@@ -465,7 +469,17 @@ export async function tick(deps: BroadcastDeps): Promise<TickReport> {
   }
 
   const unhealthy = !!throttle.enforcement && throttle.enforcement !== 'HEALTHY' && throttle.enforcement !== 'UNKNOWN';
-  await startDue(ctx, hold ? `domain_hold` : unhealthy ? `provider_${throttle.enforcement}` : null);
+  // 郵差的上限讀不到（金鑰壞了、API 掛了）：記成 UNKNOWN、今天額度 0。這時不能開寄——一開寄就凍結名單、變 sending，
+  // 之後郵差恢復會在沒有人確認的情況下全部寄出。讓排好的期留在 scheduled，過了寬限時間由 start_stale 退回草稿。
+  const unreachable = !throttle.refreshed_at || throttle.refreshed_at < minutesAgo(now, cfg.limitsRefreshMinutes);
+  await startDue(ctx, hold ? `domain_hold` : unhealthy ? `provider_${throttle.enforcement}` : unreachable ? 'provider_unreachable' : null);
+  // 已開寄、卻超過寬限時間一封都沒交出去（開寄當下郵差讀不到上限、Queue 不動…）：暫停，人確認後再放行（放行會重新起算）。
+  for (const c of await sending()) {
+    const last = Date.parse(c.last_progress_at ?? c.started_at ?? '');
+    if (!(last < now.getTime() - cfg.startGraceMinutes * 60_000)) continue;
+    const handed = await db.prepare("SELECT COUNT(*) AS n FROM campaign_recipients WHERE campaign_id = ? AND state IN ('enqueued', 'done', 'failed', 'uncertain')").bind(c.id).first<{ n: number }>();
+    if (Number(handed?.n ?? 0) === 0) await brake(ctx, c.id, 'brake:start_stale', 'yellow');
+  }
   if (hold || unhealthy) return ctx.report;
 
   // 共用額度：郵差速度（每分鐘）與今天剩餘（自己的上限、郵差 24 小時上限），扣掉已交出去還沒結果的。

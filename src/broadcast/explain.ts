@@ -53,6 +53,10 @@ export function explainPause(reason: string | null | undefined, cfg: BroadcastCo
     case 'provider_enforcement':
     case 'provider_account_paused':
       return { code, summary: `The provider reports the account is not healthy (${reason.split(':').slice(2).join(':') || code}).`, suggestion: 'Look at the provider console. Do not resume until the provider says the account is healthy again.', needsDomainRelease: false, resumable: true };
+    case 'start_stale':
+      return { code, summary: `The issue started but not one mail was handed to the provider within ${cfg.startGraceMinutes} minutes.`, threshold: { startGraceMinutes: cfg.startGraceMinutes }, suggestion: 'Usually the provider limits could not be read when it started (key or API problem) or the queue is not moving. Fix that first; resuming restarts the timer.', needsDomainRelease: false, resumable: true };
+    case 'permanent_streak':
+      return { code, summary: `Sending stopped after ${reason.split(':')[2] ?? cfg.permanentStreak} permanent failures in a row.`, suggestion: 'A run of permanent failures usually means a configuration problem (sender, domain verification, key), not bad addresses. Fix the cause before resuming.', needsDomainRelease: false, resumable: false };
     case 'freeze_blocked':
       return { code, summary: `The list could not be frozen: ${reason.split(':').slice(2).join(':')}.`, suggestion: 'Fix the audience or warm-up plan, then cancel and rebuild this issue.', needsDomainRelease: false, resumable: false };
     case 'reconcile_mismatch':

@@ -17,10 +17,14 @@
     "./unsub": "./src/unsub.ts",
     "./feedback": "./src/feedback.ts",
     "./broadcast": "./src/broadcast/index.ts",
-    "./cli": "./src/cli/main.ts"
+    "./cli": {
+      "types": "./src/cli/main.ts",
+      "default": "./dist/cli/main.js"
+    }
   },
   "files": [
     "bin",
+    "dist",
     "src",
     "migrations",
     "wrangler.example.jsonc",
@@ -46,7 +50,9 @@
     "db:migrate": "wrangler d1 migrations apply mailroom --remote",
     "deploy": "npm test && npm run typecheck && npm run db:migrate && wrangler deploy",
     "dev": "wrangler dev",
-    "clean-scan": "node .public-gate/clean-scan.mjs"
+    "clean-scan": "node .public-gate/clean-scan.mjs",
+    "build:cli": "tsc -p tsconfig.cli.json",
+    "prepack": "npm run build:cli"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261019.1",

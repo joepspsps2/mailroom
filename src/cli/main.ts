@@ -4,6 +4,8 @@
 // 預設值（名單代號、寄件人、樣板、測試信箱…）由部署端傳入 runCli 的 defaults，引擎本身不帶任何自家資訊。
 import { compose, createTemplate, preflight, type ComposeOptions, type PreflightResult } from '../compose/index.ts';
 import { parseArgs } from './args.ts';
+import { explainPause } from '../broadcast/explain.ts';
+import { resolveConfig } from '../broadcast/config.ts';
 import { friendly } from './errors.ts';
 
 export interface CliDefaults {
@@ -78,6 +80,13 @@ Options: --json (machine-readable output), --base-url, --tz +08:00
 Environment: MAILROOM_URL, MAILROOM_ADMIN_TOKEN`;
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+/** 重複建期的說明：撞到誰、用什麼撞到、下一步（寄完的期取消不了，不建議取消）。 */
+function twinText(b: Record<string, any>): string {
+  const by = b.twinBy === 'web_url' ? 'the same web version URL' : b.twinBy === 'source_ref' ? 'the same source reference' : 'the same list and body';
+  const done = b.twinStatus === 'done';
+  return `Issue "${b.twin}" (${b.twinStatus}) already has ${by}.${done ? ' It was already sent and cannot be cancelled.' : ''}\n${b.twinBy === 'source_ref' ? 'If this is a different issue that reuses the file path, pass --source-ref with something unique (for example the post id and date).' : done ? 'If this is really a new issue, its web version URL and body must differ from the sent one.' : `If it was created by mistake, cancel it first: campaign cancel ${b.twin} --reason "..." --yes.`}`;
+}
 
 function offsetOf(s: string | undefined): string {
   const v = s ?? '+08:00';
@@ -157,7 +166,7 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
     async function call(method: string, path: string, body?: unknown): Promise<Record<string, any>> {
       const r = await api(method, path, body);
       if (r.status >= 400 || r.body.ok === false) {
-        const extra = r.body.twin ? `The existing issue is "${r.body.twin}".` : r.body.status ? `Current state: ${r.body.status}.` : r.body.error ? String(r.body.error) : undefined;
+        const extra = r.body.twin ? twinText(r.body) : r.body.status ? `Current state: ${r.body.status}.` : r.body.error ? String(r.body.error) : undefined;
         throw new CliError(friendly(String(r.body.reason ?? `http_${r.status}`), extra));
       }
       return r.body;
@@ -198,8 +207,21 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
         return 0;
       }
       case 'reconcile': {
-        const r = await call('POST', `/v1/campaigns/${idArg()}/reconcile`, {});
-        emit([`reconcile: ${r.ok ? 'all numbers add up' : 'MISMATCH'}`, `frozen ${r.frozen} = sent ${r.sent} + skipped ${JSON.stringify(r.skipped)} + failed ${r.failed} + uncertain ${r.uncertain} + pending ${r.pending}`, ...(r.problems?.length ? [`problems: ${r.problems.join(', ')}`, 'Next: do not release the next warm-up step until a person has explained the differences.'] : []), ...(r.awaiting?.length ? [`still waiting for provider events: ${JSON.stringify(r.awaiting)} (run again after 72 hours)`] : [])], { reconcile: r });
+        // 對不上時引擎回 200＋ok:false（附問題清單與各項數字）：這不是「被拒絕」，要把證據印出來，所以不走 call()。
+        const res = await api('POST', `/v1/campaigns/${idArg()}/reconcile`, {});
+        if (res.status >= 400) throw new CliError(friendly(String(res.body.reason ?? `http_${res.status}`)));
+        const r = res.body;
+        const ev = r.events ?? {};
+        const evSum = Number(ev.delivered ?? 0) + Number(ev.hardBounced ?? 0) + Number(ev.softBounced ?? 0) + Number(ev.awaiting ?? 0);
+        const lines = [
+          `reconcile: ${r.ok ? 'all numbers add up' : 'MISMATCH'}`,
+          `frozen ${r.frozen} = sent ${r.sent} + skipped ${r.skippedTotal} ${JSON.stringify(r.skipped)} + failed ${r.failed} + uncertain ${r.uncertain} + pending ${r.pending}`,
+          `ledger: ${r.ledger?.sent} sent rows, ${r.ledger?.doneWithoutLedger} recipients marked sent without a ledger row`,
+          `provider events: ${ev.sends} sends vs ${r.sent} sent${ev.sends === r.sent ? '' : ' (DIFFERENT)'}; delivered ${ev.delivered} + bounced ${Number(ev.hardBounced ?? 0) + Number(ev.softBounced ?? 0)} + not reported yet ${ev.awaiting} = ${evSum} vs ${ev.sends} sends${evSum === ev.sends ? '' : ' (DIFFERENT)'}; duplicate sends ${ev.duplicateSends}`,
+          ...(r.problems?.length ? [`problems: ${r.problems.join(', ')}`, 'Next: do not release the next warm-up step until a person has explained the differences.'] : []),
+          ...(Number(ev.awaiting) > 0 ? [`${ev.awaiting} provider event(s) have not arrived yet (not a mismatch): run again after 72 hours.`] : []),
+        ];
+        io.out(json ? JSON.stringify({ ok: !!r.ok, command: cmd, reconcile: r }) : lines.join('\n'));
         return r.ok ? 0 : 1;
       }
       case 'create': return await create();
@@ -279,17 +301,20 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
         const lines = [`${id} is paused: ${s.pauseReason}`, ...(ex ? [`why: ${ex.summary}`, ...(ex.threshold ? [`threshold: ${JSON.stringify(ex.threshold)}`] : []), `suggestion: ${ex.suggestion}`] : [])];
         if (ex && !ex.resumable && flags.force !== true) throw new CliError(`${lines.join('\n')}\n\nThis pause is about a cause that must be fixed first; resuming would just stop again or send something wrong.\nNext: fix the cause, then run again with --force.`);
         const held = !!t.hold;
-        if (held && flags['release-domain'] !== true) throw new CliError(`${lines.join('\n')}\n\nThe sender domain is on hold (${t.hold.reason}); that stops every newsletter, not only this issue.\nNext: if the numbers are explained, run again with --release-domain (it releases the hold with the same note, then resumes).`);
-        const plan = [...lines, '', ...(held ? [`Would release the sender-domain hold (${t.hold.reason}).`] : []), `Would resume ${id} with note: ${note}`, ...(ex?.code === 'hard_bounce_rate' || ex?.code === 'complaint_rate' || ex?.code === 'wave_gate' ? ['That brake restarts counting from the resume.'] : [])];
+        // 網域停寄影響所有電子報：只有「這期就是因為它才暫停」時，才准一起解除；其他情況要另外看過數字再單獨解除。
+        const releaseHere = held && ex?.code === 'domain_hold';
+        if (held && !releaseHere) throw new CliError(`${lines.join('\n')}\n\nThe sender domain is on hold (${t.hold.reason}), but that is not why this issue paused. Releasing it affects every newsletter, so it is a separate decision.\nNext: run \`campaign hold release --note "..."\` (the dry run shows the threshold and the numbers), decide, then resume this issue.`);
+        if (releaseHere && flags['release-domain'] !== true) throw new CliError(`${lines.join('\n')}\n\nThis issue paused because the sender domain is on hold, and that stops every newsletter.\nNext: read the numbers above. If they are explained, \`--release-domain\` releases the hold with your note and resumes this issue in one step.`);
+        const plan = [...lines, '', ...(releaseHere ? [`Would release the sender-domain hold (${t.hold.reason}).`] : []), `Would resume ${id} with note: ${note}`, ...(ex?.code === 'hard_bounce_rate' || ex?.code === 'complaint_rate' || ex?.code === 'wave_gate' ? ['That brake restarts counting from the resume.'] : [])];
         if (!yes) return dry(plan, { pauseExplain: ex ?? null, domainHold: t.hold ?? null });
-        if (held) await call('POST', '/v1/broadcast/release-hold', { note });
+        if (releaseHere) await call('POST', '/v1/broadcast/release-hold', { note });
         let r: Record<string, any>;
         try {
           r = await call('POST', `/v1/campaigns/${id}/resume`, { note });
         } catch (e) {
-          throw new CliError(`${held ? 'The domain hold WAS released, but resuming failed:\n' : ''}${e instanceof Error ? e.message : String(e)}`);
+          throw new CliError(`${releaseHere ? 'The domain hold WAS released, but resuming failed:\n' : ''}${e instanceof Error ? e.message : String(e)}`);
         }
-        emit([...plan, '', `${id}: ${r.status}`], { result: r, domainReleased: held });
+        emit([...plan, '', `${id}: ${r.status}`], { result: r, domainReleased: releaseHere });
         return 0;
       }
       case 'cancel': {
@@ -321,8 +346,10 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
         const note = need('note');
         const t = await call('GET', '/v1/throttle');
         if (!t.hold) throw new CliError('The sender domain is not on hold: nothing to release.');
-        if (!yes) return dry([`Would release the sender-domain hold (${t.hold.reason}). Paused issues stay paused until resumed one by one.`], { hold: t.hold });
-        emit([`released ${(await call('POST', '/v1/broadcast/release-hold', { note })).released} hold(s)`, 'Next: resume each paused issue with `campaign resume <id> --note "..." --yes`.'], {});
+        const hx = explainPause(`brake:domain_hold:${t.hold.reason}`, resolveConfig(t.config));
+        const hlines = [`sender domain on hold since ${t.hold.created_at}: ${t.hold.reason}`, ...(hx ? [`why: ${hx.summary}`, `threshold: ${JSON.stringify(hx.threshold)}`, `suggestion: ${hx.suggestion}`] : [])];
+        if (!yes) return dry([...hlines, '', 'Would release the hold. Paused issues stay paused until resumed one by one.'], { hold: t.hold, explain: hx });
+        emit([...hlines, `released ${(await call('POST', '/v1/broadcast/release-hold', { note })).released} hold(s)`, 'Next: resume each paused issue with `campaign resume <id> --note "..." --yes`.'], {});
         return 0;
       }
       default:

@@ -10,7 +10,7 @@ node bin/mailroom.mjs campaign status weekly-12
 node bin/mailroom.mjs --config ./my-defaults.mjs campaign create --issue weekly-12 --post my-post --yes
 ```
 
-Requires Node 22.18+ (it loads the TypeScript sources directly). Your own defaults (list, sender, template, test addresses…) live in a module
+Requires Node 22.18+. Installed from npm it runs the compiled JavaScript in `dist/` (built by `prepack`; Node does not strip types inside `node_modules`); in a source checkout it loads the TypeScript directly. Your own defaults (list, sender, template, test addresses…) live in a module
 whose default export is a `CliDefaults` (`--config <path>` or `MAILROOM_CONFIG`), or call `runCli(argv, { defaults, env })` from your own script.
 Nothing specific to one deployment is built in.
 
@@ -33,8 +33,8 @@ Nothing specific to one deployment is built in.
 | 5 | `campaign schedule ID --at "2027-03-01 09:00" --yes` | Local time (default `+08:00`, `--tz`); a past time is refused. The dry run prints who would receive it per wave. `unschedule` takes it back. `start ID --yes` = schedule for now |
 | 6 | `campaign status ID` | State, brake light (green / yellow = a rate is at half its brake / red), counts, rates, why it paused and what to do |
 | 7 | `campaign pause ID --reason "…" --yes` | Emergency stop; mail already handed to the provider still goes out |
-| 8 | `campaign resume ID --note "what was checked" [--release-domain] [--force] --yes` (alias `release`) | Shows which brake fired, the numerator and denominator and the suggestion. If the sender domain is on hold it refuses until you add `--release-domain` (releases the hold with the same note, then resumes). A pause whose cause must be fixed first (render error, reconciliation mismatch…) needs `--force` |
-| 9 | `campaign reconcile ID` | frozen = sent + skipped + failed + uncertain + pending; run again 72 hours after it finished |
+| 8 | `campaign resume ID --note "what was checked" [--release-domain] [--force] --yes` (alias `release`) | Shows which brake fired, the numerator and denominator and the suggestion. `--release-domain` is accepted only when this issue paused *because of* the sender-domain hold (it then releases the hold with the same note and resumes). If the hold exists but is not why this issue paused, release it separately with `hold release` (its dry run prints the threshold and the numbers). A pause whose cause must be fixed first (render error, reconciliation mismatch, a run of permanent failures…) needs `--force` |
+| 9 | `campaign reconcile ID` | frozen = sent + skipped + failed + uncertain + pending, ledger rows, and provider events (sends vs sent; delivered + bounced + not-yet-reported vs sends). A mismatch prints the problem list and every number and exits 1. Run again 72 hours after it finished |
 | — | `campaign retry-failed ID --yes` | Only while the issue is sending or paused; a finished issue is closed |
 | — | `campaign resolve ID --contact N --as sent\|failed --note "…" --yes` | For a recipient left "uncertain" |
 | — | `campaign cancel ID --reason "…" --yes` | Not undoable |
@@ -49,4 +49,4 @@ All in `BROADCAST_CONFIG` (see [broadcast.md](broadcast.md#all-settings-broadcas
   complaint is 0.45%, so with the default one complaint stops every newsletter on the domain. That errs on the safe side; raise it if you would
   rather have a person look first. `campaign resume … --release-domain` is the one-step way out.
 - `waveGateMinSent` (default 1): with small waves one bounce can cross the 2% wave gate.
-- `startGraceMinutes` (default 360): how late a scheduled issue may start before it goes back to `approved`.
+- `startGraceMinutes` (default 360): how late a scheduled issue may start before it goes back to `draft` (and must be approved again).

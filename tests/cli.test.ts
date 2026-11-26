@@ -325,3 +325,48 @@ test('retry-failed：寄完（done）之後引擎不再重送，指令照實講'
   assert.equal(r.code, 1);
   assert.match(r.err, /finished|done/);
 });
+
+test('必修2：對帳對不上 → 指令印出問題清單與各項數字、結束碼 1（不是「Refused: http_200」）；--json 帶完整報告', async () => {
+  const c = await cliWorld({ members: 20, config: { paceMinutes: 1 } });
+  await c.ready('rc-1');
+  await c.run(['campaign', 'start', 'rc-1', '--yes']);
+  await c.w.run(60, { until: async () => (await c.w.status('rc-1')).status === 'done' });
+  const ok = await c.run(['campaign', 'reconcile', 'rc-1']);
+  assert.equal(ok.code, 0);
+  assert.match(ok.out, /provider events: 20 sends vs 20 sent; delivered 20 \+ bounced 0 \+ not reported yet 0 = 20 vs 20 sends/);
+  // 製造對不上：一筆帳本改成失敗（寄出數與帳本 sent 數不一致）
+  await c.w.db.prepare("UPDATE messages SET status = 'failed' WHERE id = (SELECT MIN(id) FROM messages WHERE stream = 'marketing')").run();
+  const bad = await c.run(['campaign', 'reconcile', 'rc-1']);
+  assert.equal(bad.code, 1);
+  assert.match(bad.out, /MISMATCH/);
+  assert.match(bad.out, /problems: .+/);
+  assert.match(bad.out, /ledger: /);
+  assert.match(bad.out, /Next: do not release the next warm-up step/);
+  assert.doesNotMatch(bad.err + bad.out, /Refused: http_200/);
+  const j = (await c.run(['campaign', 'reconcile', 'rc-1', '--json'])).json();
+  assert.equal(j.ok, false);
+  assert.ok(j.reconcile.problems.length > 0);
+  // 事件還沒回來：不算對不上，但要講清楚還在等
+  const c2 = await cliWorld({ members: 10, config: { paceMinutes: 1 } });
+  await c2.w.db.prepare('SELECT 1').run();
+  assert.equal((await c2.run(['campaign', 'reconcile', 'nope'])).code, 1);
+});
+
+test('建議3：--release-domain 只在「這期就是因為網域停寄才暫停」時接受；其他原因先單獨看網域停寄的門檻與數字', async () => {
+  const c = await cliWorld({ members: 20 });
+  await c.ready('hd-1');
+  await c.run(['campaign', 'start', 'hd-1', '--yes']);
+  await c.w.run(3);
+  await c.run(['campaign', 'pause', 'hd-1', '--reason', 'checking', '--yes']);
+  await c.w.db.prepare("INSERT INTO domain_holds (domain, reason, created_at) VALUES (?, 'complaint_rate:1/220', ?)").bind(DOMAIN, c.w.now().toISOString()).run();
+  const r = await c.run(['campaign', 'resume', 'hd-1', '--note', 'x', '--release-domain', '--yes']);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /not why this issue paused/);
+  assert.match(r.err, /campaign hold release/);
+  assert.doesNotMatch(r.err, /run again with --release-domain/);
+  assert.equal((await c.state('hd-1')).status, 'paused');
+  const hold = await c.run(['campaign', 'hold', 'release', '--note', 'checked']);
+  assert.match(hold.out, /why: The sender domain is on hold: complaints 1 of 220/);
+  assert.match(hold.out, /minComplaints/);
+  assert.match(hold.out, /DRY RUN/);
+});
