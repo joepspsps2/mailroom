@@ -41,7 +41,7 @@ draft: false
 
 長連結：https://example.com/very/long/path/that/keeps/going/and/going/and/going/index.html?utm_source=old&token=abcdefghijklmnopqrstuvwxyz0123456789
 
-文章詳細版：https://example.com/p/100。
+文章詳細版：https://example.com/p/100
 
 ```
 const a = 1;

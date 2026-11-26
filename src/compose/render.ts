@@ -110,7 +110,11 @@ function inlineText(n: Inline, labels: Labels): string {
       const text = n.c.map((x) => inlineText(x, labels)).join('');
       const url = n.tu ?? n.href;
       if (url === '') return text;
-      if (n.bare || text.trim() === '' || text.trim() === n.href) return url;
+      // 讀者在網站上看得到的連結文字不能在純文字版消失：只有它就是印出來的網址、或是一串網址且整串出現在印出來的網址裡
+      // （沒追蹤的裸網址，後面只多了 utm）才省略。裸網址也一樣——網站上它的文字就是那串網址（緊貼在後面、沒空格的字也算在內），
+      // 追蹤轉址看不出來，所以照「文字 (網址)」印。
+      const shown = text.trim();
+      if (shown === '' || shown === url || (/^https?:\/\//i.test(shown) && url.includes(shown))) return url;
       return `${text} (${url})`;
     }
   }
