@@ -17,8 +17,11 @@ const clean = (v: unknown, max: number): string | undefined =>
 
 /** 同一個 isolate 一分鐘最多送幾則告警（超過只寫 log）：沒有人能靠亂打網址把告警頻道灌爆。 */
 const MAX_ALERTS_PER_MIN = 20;
-let windowStart = 0;
-let windowCount = 0;
+/** 網頁亂打（任何人都能送）與信件（要寄信、較難灌）各有自己的額度，網頁灌爆不會擠掉真正的退訂信告警。 */
+const budgets: Record<'page' | 'mail', { start: number; count: number; max: number }> = {
+  page: { start: 0, count: 0, max: MAX_ALERTS_PER_MIN },
+  mail: { start: 0, count: 0, max: 60 },
+};
 
 export interface AlertPayload {
   event: AlertEvent;
@@ -53,9 +56,10 @@ export async function sendAlert(cfg: AlertConfig, payload: AlertPayload, now: ()
   const redacted = { ...body, token: short, subject: body.token && body.subject ? '[subject carries the token]' : body.subject };
   console.error('unsub alert', JSON.stringify(redacted));
   if (!cfg.url) return false;
-  if (at.getTime() - windowStart >= 60_000) { windowStart = at.getTime(); windowCount = 0; }
-  if (++windowCount > MAX_ALERTS_PER_MIN) {
-    console.error('unsub alert rate limited');
+  const budget = budgets[payload.via === 'page' ? 'page' : 'mail'];
+  if (at.getTime() - budget.start >= 60_000) { budget.start = at.getTime(); budget.count = 0; }
+  if (++budget.count > budget.max) {
+    console.error('unsub alert rate limited', payload.via ?? 'mail');
     return false;
   }
   if (!/^https:\/\/[^\s]+$/i.test(cfg.url)) {
@@ -88,4 +92,4 @@ export function warnIfNoAlert(url: string | undefined): boolean {
   return false;
 }
 /** 測試用：重置一次性警告。 */
-export function resetAlertWarning(): void { warned = false; windowStart = 0; windowCount = 0; }
+export function resetAlertWarning(): void { warned = false; for (const b of Object.values(budgets)) { b.start = 0; b.count = 0; } }
