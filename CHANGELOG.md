@@ -4,7 +4,7 @@
 
 - **Newsletter lists** (see `docs/lists.md`). New D1 migration `0005_lists.sql` (`contacts`, `lists`, `list_members`); internal `listSubscribe` / `listUnsubscribe` / `listStatus` / `listMembers`; admin endpoints `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments`. Nothing changes for existing sends.
 
-- **Compose module** (`@joelincc/mailroom/compose`): markdown → email HTML and plain text, a configurable template factory, personalisation (`{{name}}`, `{{email}}`, `{{unsubscribe_url}}`, `{{web_url}}`), tracking-link and open-pixel placeholders, a pre-send check that blocks scheduling, and preview output. No new migration, no new dependency. See `docs/composing.md`.
+- **Compose module** (`@joelincc/mailroom/compose`): markdown → email HTML and plain text, a configurable template factory, personalisation (`{{name}}`, `{{email}}`, `{{unsubscribe_url}}`, `{{web_url}}`), tracking-link and open-pixel placeholders, a pre-send check that blocks scheduling, and preview output. No new migration, no new dependency. Pre-send checks cover the whole final HTML (footer included), refuse offline mode and a missing web-version URL, and an optional `unsubscribe_mailto` header segment and `detectScannerClicks()` are available. See `docs/composing.md`.
 
 ## 0.2.0
 

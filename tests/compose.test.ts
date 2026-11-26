@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { compose, createTemplate, parseMarkdown, personalize, preflight, buildPreview, scanPlaceholders, PersonalizeError, type ComposeOptions, type PreflightOptions } from '../src/compose/index.ts';
+import { compose, createTemplate, parseMarkdown, personalize, preflight, buildPreview, scanPlaceholders, detectScannerClicks, PersonalizeError, type ComposeOptions, type PreflightOptions } from '../src/compose/index.ts';
 
 const sample = readFileSync(new URL('./fixtures/sample-issue.md', import.meta.url), 'utf8');
 
@@ -19,7 +19,8 @@ const base = (over: Partial<ComposeOptions> = {}): ComposeOptions => ({ source: 
 const vars = { name: '小明', email: 'reader@example.com', unsubscribe_url: 'https://u.example.com/x?t=1&a=2', web_url: 'https://example.com/p/100' };
 const track = (k: 'c' | 'o', i?: number) => (k === 'c' ? `SIG${i}` : 'SIGO');
 const okFetch: PreflightOptions['fetch'] = async () => ({ status: 200 });
-const pf = (c: ReturnType<typeof compose>, over: Partial<PreflightOptions> = {}) => preflight(c, { template, fetch: okFetch, ...over });
+const WEB = 'https://example.com/p/100';
+const pf = (c: ReturnType<typeof compose>, over: Partial<PreflightOptions> = {}) => preflight(c, { template, fetch: okFetch, webUrl: WEB, ...over });
 const codes = (r: { issues: { code: string; severity: string }[] }, sev = 'error') => r.issues.filter((i) => i.severity === sev).map((i) => i.code);
 
 test('產信：吃原稿、吐 HTML＋純文字＋連結表，標題與預覽文字來自 frontmatter', () => {
@@ -189,9 +190,9 @@ test('個人化：名字裡的 HTML／佔位文字不會被展開或執行；換
 });
 
 test('寄前檢查：正常的一期通過；每一條失敗都有對應的測試', async () => {
-  const good = await pf(compose(base()), { webUrl: 'https://example.com/p/100' });
+  const good = await pf(compose(base()));
   assert.deepEqual(codes(good), []);
-  assert.ok(good.ok);
+  assert.ok(good.ok && good.linksChecked && good.webChecked);
   assert.ok(good.linkStatuses.length >= 4); // 3 連結＋1 圖＋網頁版
 });
 
@@ -218,7 +219,7 @@ test('寄前檢查 3：退訂連結、純文字退訂、兩個標頭缺任何一
 test('寄前檢查 4：實體地址缺、是待補標記、沒進內容、頁尾有待補標記，都擋下', async () => {
   const c = compose(base());
   const t = (addr: string, extra: string[] = []) => createTemplate({ brandName: 'B', postalAddress: addr, footerLines: extra });
-  const run = async (tpl: ReturnType<typeof t>) => codes(await preflight(compose(base({ template: tpl })), { template: tpl, fetch: okFetch }));
+  const run = async (tpl: ReturnType<typeof t>) => codes(await preflight(compose(base({ template: tpl })), { template: tpl, fetch: okFetch, webUrl: WEB }));
   assert.ok((await run(t(''))).includes('address_missing'));
   assert.ok((await run(t('[[TODO: 補地址]]'))).includes('address_todo'));
   assert.ok((await run(t('1 Example Street', ['【待補：官網網址】']))).includes('todo_marker'));
@@ -277,9 +278,9 @@ test('寄前檢查 8：只有 404／410 算壞連結；逾時、連不上、其�
   const methods: string[] = [];
   await pf(c, { fetch: async (_u, init) => { methods.push(init?.method ?? ''); return { status: init?.method === 'HEAD' ? 405 : 200 }; } });
   assert.ok(methods.includes('GET'));
-  // 離線模式：不打網路，記一條警告
+  // 離線模式：不打網路，但沒查過連結就不准排程
   const off = await pf(c, { checkLinks: false, fetch: async () => { throw new Error('should not be called'); } });
-  assert.ok(off.ok && codes(off, 'warn').includes('links_unchecked'));
+  assert.ok(!off.ok && codes(off).includes('links_unchecked') && !off.linksChecked);
 });
 
 test('寄前檢查：原稿轉不出來的問題會一路帶進檢查結果（不准帶錯寄）', async () => {
@@ -330,7 +331,7 @@ test('樣板：自訂頁尾區塊與退訂引導句進 HTML 與純文字；退�
   assert.ok(c.html.indexOf('Custom block') < c.html.indexOf('unsubscribe_url}}"'));
   assert.match(c.text, /Custom block: https:\/\/example\.com\/about/);
   assert.match(c.text, /No longer interested\? Unsubscribe: \{\{unsubscribe_url\}\}\n$/);
-  assert.deepEqual(codes(await preflight(c, { template: tpl, fetch: okFetch })), []);
+  assert.deepEqual(codes(await preflight(c, { template: tpl, fetch: okFetch, webUrl: WEB })), []);
 });
 
 test('寄前檢查：轉址每一跳都重查內網；內網各種寫法（IPv6、對映、十進位、100.64）都擋；轉到壞頁照 404 算', async () => {
@@ -348,4 +349,132 @@ test('寄前檢查：轉址每一跳都重查內網；內網各種寫法（IPv6�
   // 直接寫在原稿裡的內網寫法
   const direct = compose(base({ source: '---\ntitle: t\ndescription: d\n---\n\n[a](http://[::ffff:7f00:1]/) [b](http://100.64.1.1/) [c](http://0x7f000001/)' }));
   assert.equal(codes(await pf(direct)).filter((x) => x === 'link_private_host').length, 3);
+});
+
+const FM = '---\ntitle: t\ndescription: d\n---\n\n';
+
+test('沒收尾的註解與程式碼框：記 error，後面的內容不能被默默吃掉', async () => {
+  const c1 = compose(base({ source: `${FM}para1\n\n<!-- note\n\npara2 還在` }));
+  assert.ok(c1.problems.some((p) => p.code === 'unclosed_comment' && p.severity === 'error'));
+  assert.match(c1.text, /para2 還在/, '註解沒收尾時，後面的段落仍保留');
+  assert.ok(!(await pf(c1)).ok);
+  const c2 = compose(base({ source: `${FM}para1\n\n\`\`\`\ncode\n\npara2` }));
+  assert.ok(c2.problems.some((p) => p.code === 'unclosed_fence' && p.severity === 'error'));
+  assert.ok(!(await pf(c2)).ok);
+  // 有收尾的照常
+  const ok = compose(base({ source: `${FM}a\n\n<!-- 註解 -->\n\n\`\`\`\ncode\n\`\`\`\n\nb` }));
+  assert.deepEqual(ok.problems.filter((p) => p.severity === 'error'), []);
+  assert.doesNotMatch(ok.text, /註解/);
+});
+
+test('<網址> 自動連結、<a href>、<b>／<i>：認得；<a> 只留 href 與文字；圖表（mermaid）換成連結卡', () => {
+  const c = compose(base({ source: `${FM}看這篇 <https://example.com/a> 與 <a href="https://example.com/b" target="_blank" rel="nofollow" onclick="x()">B 站</a>，<b>粗</b><i>斜</i>\n\n圖片來源：<a href='https://example.com/c'>C</a>\n\n\`\`\`mermaid\ngraph TD\nA-->B\n\`\`\`` }));
+  assert.deepEqual(c.problems.filter((p) => p.severity === 'error'), []);
+  assert.deepEqual(c.links.map((l) => l.original), ['https://example.com/a', 'https://example.com/b', 'https://example.com/c']);
+  assert.ok(!/onclick|nofollow|_blank/.test(c.html));
+  assert.match(c.html, /<strong>粗<\/strong><em>斜<\/em>/);
+  assert.match(c.html, />B 站<\/a>/);
+  assert.match(c.html, /href="\{\{web_url\}\}"[^>]*>這個內容請到網站觀看/);
+  assert.ok(c.problems.some((p) => p.code === 'embed_replaced'));
+  // 不成對或不認得的標籤仍是 error
+  assert.ok(compose(base({ source: `${FM}<span style="x">a</span>` })).problems.some((p) => p.code === 'unsupported_html'));
+  assert.ok(compose(base({ source: `${FM}<a name="x">沒有 href</a>` })).problems.some((p) => p.code === 'unsupported_html'));
+});
+
+test('utm 直接接在原網址後面：原本的查詢字串、逗號、斜線、無值參數、錨點都原樣保留', () => {
+  const urls = ['https://example.com/p?sig=a/b,c%2Fd&t&x=1#frag', 'https://example.com/plain', 'https://example.com/q?', 'https://example.com/r?utm_campaign=mine'];
+  const c = compose(base({ source: `${FM}${urls.map((u, i) => `[l${i}](${u})`).join(' ')}` }));
+  assert.equal(c.links[0].url, 'https://example.com/p?sig=a/b,c%2Fd&t&x=1&utm_source=newsletter&utm_medium=email&utm_campaign=2026-01-05#frag');
+  assert.equal(c.links[1].url, 'https://example.com/plain?utm_source=newsletter&utm_medium=email&utm_campaign=2026-01-05');
+  assert.equal(c.links[2].url, 'https://example.com/q?utm_source=newsletter&utm_medium=email&utm_campaign=2026-01-05');
+  assert.equal(c.links[3].url, 'https://example.com/r?utm_campaign=mine&utm_source=newsletter&utm_medium=email');
+});
+
+test('離線模式與沒給網頁版網址：都不准排程，並回報有沒有真的查過', async () => {
+  const c = compose(base());
+  const off = await preflight(c, { template, checkLinks: false, webUrl: WEB });
+  assert.ok(!off.ok && !off.linksChecked && !off.webChecked && codes(off).includes('links_unchecked'));
+  const noWeb = await preflight(c, { template, fetch: okFetch });
+  assert.ok(!noWeb.ok && !noWeb.webChecked && codes(noWeb).includes('web_url_unchecked'));
+  const full = await pf(c);
+  assert.ok(full.ok && full.linksChecked && full.webChecked);
+  const webDown = await pf(c, { fetch: async (u) => { if (u === WEB) throw new Error('net'); return { status: 200 }; } });
+  assert.ok(!webDown.webChecked && codes(webDown, 'warn').includes('web_url_unverified'));
+});
+
+test('頁尾（樣板）裡的圖與連結也檢查：壞連結、壞圖、缺替代文字、待補標記網址都擋下', async () => {
+  const mk = (footerHtml: string) => createTemplate({ brandName: 'B', postalAddress: '1 Example Street', footerHtml });
+  const run = async (footerHtml: string, fetch: PreflightOptions['fetch'] = okFetch) => {
+    const tpl = mk(footerHtml);
+    return preflight(compose(base({ template: tpl })), { template: tpl, fetch, webUrl: WEB });
+  };
+  const gone = (needle: string): PreflightOptions['fetch'] => async (u) => ({ status: u.includes(needle) ? 404 : 200 });
+  assert.ok(codes(await run('<img src="https://cdn.example.com/logo.png" alt="logo">', gone('logo.png'))).includes('image_broken'));
+  assert.ok(codes(await run('<a href="https://example.com/about">x</a>', gone('/about'))).includes('link_broken'));
+  assert.ok(codes(await run('<img src="https://cdn.example.com/logo.png">')).includes('image_alt_missing'));
+  const todo = await run('<img src="[[TODO: 自家圖床網址]]" alt="logo">');
+  assert.ok(codes(todo).includes('todo_marker') && codes(todo).includes('link_invalid'));
+  assert.deepEqual(codes(await run('<img src="https://cdn.example.com/logo.png" alt="logo"><a href="mailto:a@example.com">m</a><a href="tel:+100">t</a>')), []);
+});
+
+test('錨點與 tel：#錨點拿掉連結只警告、tel 原樣保留不追蹤', () => {
+  const c = compose(base({ source: `${FM}[跳](#sec) [打電話](tel:+886000000000)` }));
+  assert.ok(c.problems.some((p) => p.code === 'anchor_link' && p.severity === 'warn'));
+  assert.match(c.html, /href="tel:\+886000000000"/);
+  assert.equal(c.links.length, 0);
+  assert.ok(!c.html.includes('href="#sec"'));
+});
+
+test('退訂標頭：可帶 mailto 兩段；兩種寫法 preflight 都接受；少填或亂填 mailto 拋錯；網址夾換行拋錯', async () => {
+  const c = compose(base({ unsubscribeMailto: true }));
+  assert.equal(c.headers['List-Unsubscribe'], '<{{unsubscribe_url}}>, <{{unsubscribe_mailto}}>');
+  assert.deepEqual(codes(await pf(c)), []);
+  assert.deepEqual(codes(await pf(compose(base()))), []);
+  const v = { ...vars, unsubscribe_mailto: 'mailto:unsub@example.com?subject=abc123' };
+  const p = personalize(c, v, { track });
+  assert.equal(p.headers['List-Unsubscribe'], '<https://u.example.com/x?t=1&a=2>, <mailto:unsub@example.com?subject=abc123>');
+  assert.throws(() => personalize(c, vars, { track }), (e: unknown) => e instanceof PersonalizeError && e.code === 'missing_field');
+  for (const bad of ['unsub@example.com', 'mailto:a b@example.com', 'mailto:a@example.com,b@example.com', 'mailto:<x>@example.com']) {
+    assert.throws(() => personalize(c, { ...vars, unsubscribe_mailto: bad }, { track }), (e: unknown) => e instanceof PersonalizeError && e.code === 'bad_url', bad);
+  }
+  assert.throws(() => personalize(c, { ...v, unsubscribe_url: 'https://u.example.com/x\r\nBcc: a@example.com' }, { track }), (e: unknown) => e instanceof PersonalizeError && e.code === 'bad_url');
+  assert.throws(() => personalize(c, { ...v, web_url: 'https://example.com/\n' + 'x' }, { track }), (e: unknown) => e instanceof PersonalizeError);
+  // 內容裡有 mailto 佔位但標頭只有一段、或標頭寫錯格式 → 擋
+  assert.ok(codes(await pf({ ...c, headers: { ...c.headers, 'List-Unsubscribe': '<{{unsubscribe_mailto}}>' } })).includes('unsubscribe_header_missing'));
+});
+
+test('假點擊標記：寄出後 60 秒內同一封信點了 3 個以上不同連結＝標記；邊界與不同信互不影響', () => {
+  const t0 = 1_000_000;
+  const sent = new Map([['m1', t0], ['m2', t0], ['m3', t0]]);
+  const ck = (id: string, m: string, l: number, dt: number) => ({ id, messageId: m, linkIndex: l, at: t0 + dt });
+  const flagged = detectScannerClicks([
+    ck('a1', 'm1', 1, 2_000), ck('a2', 'm1', 2, 2_100), ck('a3', 'm1', 3, 2_200), ck('a4', 'm1', 1, 50_000), // m1：窗內 3 個不同連結 → 全標（含窗內重複點）
+    ck('b1', 'm2', 1, 1_000), ck('b2', 'm2', 2, 1_100), ck('b3', 'm2', 2, 1_200), // m2：只 2 個不同連結 → 不標
+    ck('c1', 'm3', 1, 1_000), ck('c2', 'm3', 2, 1_100), ck('c3', 'm3', 3, 60_001), // m3：第 3 個超過 60 秒 → 不標
+    ck('d1', 'nope', 1, 1), ck('d2', 'nope', 2, 2), ck('d3', 'nope', 3, 3), // 查不到寄出時間 → 不標
+    ck('e1', 'm1', 4, 120_000), // 窗外 → 不標
+  ], sent);
+  assert.deepEqual([...flagged].sort(), ['a1', 'a2', 'a3', 'a4']);
+  const exact = detectScannerClicks([ck('x1', 'm1', 1, 0), ck('x2', 'm1', 2, 30_000), ck('x3', 'm1', 3, 60_000)], { m1: t0 });
+  assert.equal(exact.size, 3, '剛好 60 秒算在窗內');
+  assert.equal(detectScannerClicks([ck('y1', 'm1', 1, -5), ck('y2', 'm1', 2, 1), ck('y3', 'm1', 3, 2)], sent).size, 0, '寄出前的點擊不算');
+  assert.equal(detectScannerClicks([ck('z1', 'm1', 1, 1), ck('z2', 'm1', 2, 2)], sent, { minDistinctLinks: 2 }).size, 2, '門檻可調');
+});
+
+test('小問題：&nbsp; 不重複跳脫；{{ 可用 \\{\\{ 跳脫成字面；沒名字的純文字沒有連續空行；行內圖不寫死寬度；HEAD 回 404 再用 GET 確認', async () => {
+  const c = compose(base({ source: `${FM}a&nbsp;b &amp; c &lt;x&gt; &#39;q&#39;\n\n範例語法：\\{\\{name}} 與 \`{{code}}\`\n\n文字![行內](https://img.example.com/i.png)後` }));
+  assert.ok(!c.html.includes('&amp;nbsp;') && !c.html.includes('&amp;amp;'));
+  assert.match(c.html, /a b &amp; c &lt;x&gt; &#39;q&#39;/);
+  assert.deepEqual(codes(await pf(c)), []);
+  const p = personalize(c, vars, { track });
+  assert.match(p.text, /範例語法：\{\{name\}\} 與 \{\{code\}\}/);
+  assert.match(p.html, /&#123;&#123;name\}\}/);
+  assert.ok(!/width="\d+"[^>]*i\.png|i\.png[^>]*width="\d+"/.test(c.html));
+  const nn = personalize(compose(base()), { ...vars, name: null }, { track });
+  assert.ok(!/\n{3,}/.test(nn.text));
+  const methods: string[] = [];
+  const r = await pf(compose(base()), { fetch: async (_u, init) => { methods.push(init?.method ?? ''); return { status: init?.method === 'HEAD' ? 404 : 200 }; } });
+  assert.ok(r.ok && methods.includes('GET'), 'HEAD 404 但 GET 200 不算壞連結');
+  const real404 = await pf(compose(base()), { fetch: async () => ({ status: 404 }) });
+  assert.ok(codes(real404).includes('link_broken'));
 });
