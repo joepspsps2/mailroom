@@ -420,3 +420,12 @@ test('帳本保存天數設很短也不會清掉電子報的帳本列（至少�
   await purgeLedger(w.db, 30, new Date(w.clock.t + 401 * 86_400_000));
   assert.equal(w.count('messages', "stream = 'marketing'"), 0);
 });
+
+test('郵差報了滾動 24 小時已用量（SES GetAccount 的 SentLast24Hours）：今天只寄得到剩下的', async () => {
+  const w = await makeWorld({ members: 100, config: { paceMinutes: 1 }, postman: { limits: { perSecond: 1, perDay: 200, sentLast24h: 170 } } });
+  await w.campaign('roll-1');
+  await w.run(5);
+  assert.equal(w.postman.accepted.length, 30);
+  const row = await w.db.prepare('SELECT sent, "limit", provider_per_day, paused, reason FROM throttle_days WHERE domain = ?').bind(DOMAIN).first<Record<string, unknown>>();
+  assert.deepEqual({ ...row }, { sent: 30, limit: 30, provider_per_day: 200, paused: 1, reason: 'daily_limit' });
+});

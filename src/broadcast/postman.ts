@@ -7,6 +7,8 @@
 // - temporary／permanent／throttled／account_paused＝郵差明確說沒收下（引擎可以安全地再試或停下）。
 // - 丟例外＝不知道有沒有寄出 → 引擎把那一位記成 uncertain、絕不自動重寄（寧可漏一封也不寄兩封）。
 
+import type { TransientCause } from '../feedback.ts';
+
 export type EventType = 'send' | 'delivery' | 'bounce' | 'complaint' | 'reject' | 'delay' | 'open' | 'click' | 'unsubscribe';
 export const EVENT_TYPES: readonly EventType[] = ['send', 'delivery', 'bounce', 'complaint', 'reject', 'delay', 'open', 'click', 'unsubscribe'];
 
@@ -37,6 +39,8 @@ export interface PostmanLimits {
   sentLast24h?: number;
   /** 帳號健康狀態；不是 HEALTHY 就踩煞車。 */
   enforcement: string;
+  /** 帳號是否已離開沙盒（有的郵差才報）。 */
+  production?: boolean;
 }
 
 export interface Postman {
@@ -55,6 +59,11 @@ export interface ProviderEvent {
   type: EventType;
   /** bounce 用：Permanent／Transient／Undetermined。 */
   subtype?: string | null;
+  /**
+   * 暫時退信的原因（交給 applyFeedback 決定要不要累計）：只有 'mailbox'（信箱滿）會累計成「連續暫時退信」；
+   * 'content'（內容／附件被拒、信太大）不累計；沒給＝不累計（一般性、無法判定的暫時退信都屬這類）。
+   */
+  cause?: TransientCause | null;
   at: string;
   email?: string | null;
   campaign?: string | null;
@@ -178,7 +187,7 @@ export class FakePostman implements Postman {
     this.accepted.push(mail);
     const providerId = `${this.name}-${++this.seq}-${mail.tags.campaign}-${mail.tags.contact}`;
     const at = (this.opts.now ?? (() => new Date()))();
-    const emit = async (type: EventType, subtype: string | null = null, detail: Record<string, unknown> | null = null) => {
+    const emit = async (type: EventType, subtype: string | null = null, detail: Record<string, unknown> | null = null, cause?: TransientCause) => {
       if (!this.opts.emit) return;
       const delay = this.opts.delays?.[type] ?? DEFAULT_DELAYS[type];
       await this.opts.emit(
@@ -193,13 +202,14 @@ export class FakePostman implements Postman {
           campaign: mail.tags.campaign,
           contact: mail.tags.contact,
           detail,
+          ...(cause ? { cause } : {}),
         },
         delay,
       );
     };
     await emit('send');
     if (outcome === 'hard_bounce' || outcome === 'suppressed') await emit('bounce', 'Permanent', { bounceSubType: outcome === 'suppressed' ? 'OnAccountSuppressionList' : 'General' });
-    else if (outcome === 'soft_bounce') await emit('bounce', 'Transient');
+    else if (outcome === 'soft_bounce') await emit('bounce', 'Transient', { bounceSubType: 'MailboxFull' }, 'mailbox');
     else {
       if (outcome === 'delay') await emit('delay');
       await emit('delivery');

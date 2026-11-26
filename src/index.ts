@@ -3,7 +3,7 @@
 // 兩個入口：
 // - 內線（service binding）：同一個 Cloudflare 帳號的站在 wrangler.jsonc 加
 //   { "binding": "MAILROOM", "service": "mailroom", "entrypoint": "Mailroom" }，呼叫 env.MAILROOM.send({...})。
-// - 公開網址（workers.dev）：Resend 事後回報 POST /webhooks/resend；
+// - 公開網址（workers.dev）：Resend 事後回報 POST /webhooks/resend；SES 事後回報（SNS）POST /webhooks/ses；
 //   別的 Cloudflare 帳號的站帶自己的鑰匙 POST /v1/send；演習 POST /v1/drill；寄信統計 GET /v1/report；
 //   人工解除拒收 POST /v1/unsuppress。
 // - 退訂：GET／POST /u/{券}、POST /u/{券}/resubscribe；email() 收退訂信。
@@ -23,6 +23,7 @@ import { handleEmailMessage, unsubConfig } from './unsub-wiring.ts';
 import { warnIfNoAlert } from './alert.ts';
 import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.ts';
 import { handleEvent, verifySignature } from './webhook.ts';
+import { handleSesWebhook } from './ses-events.ts';
 import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
 import { broadcastQueue, broadcastTick, isBroadcastBatch, type BroadcastEnv } from './broadcast/worker.ts';
 
@@ -69,6 +70,10 @@ export interface Env extends BroadcastEnv {
   UNSUB_ALERT_TOKEN?: string;
   /** 退訂頁文字（JSON 物件，只寫想改的欄位，見 docs/unsubscribe.md）。 */
   UNSUB_PAGE?: string | Record<string, unknown>;
+  /** SES 事件入口准收的 SNS 主題 ARN（逗號分隔）。沒設＝POST /webhooks/ses 一律 404。 */
+  SES_SNS_TOPIC_ARNS?: string;
+  /** "true"＝也收 SNS SignatureVersion 1（SHA1）。預設只收 2，主題請設 SignatureVersion=2。 */
+  SES_SNS_ALLOW_SHA1?: string;
   [key: `HTTP_KEY_${string}`]: string | undefined;
 }
 
@@ -225,6 +230,16 @@ export default {
       const outcome = await handleEvent(env.DB, h.get('svix-id') ?? '', body);
       console.log('resend webhook', outcome);
       return json({ ok: true });
+    }
+
+    if (url.pathname === '/webhooks/ses' && request.method === 'POST') {
+      const topicArns = (env.SES_SNS_TOPIC_ARNS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!topicArns.length || !env.SES_REGION) return notFound();
+      const size = bodySizeProblem(request.headers.get('content-length'), MAX_WEBHOOK_BYTES);
+      if (size) return new Response(size, { status: size === 'missing' ? 411 : 413 });
+      const r = await handleSesWebhook(env.DB, await request.text(), { region: env.SES_REGION, topicArns, allowSha1: env.SES_SNS_ALLOW_SHA1 === 'true' }, request.headers.get('x-amz-sns-message-type'));
+      (r.status === 200 ? console.log : console.warn)('ses webhook', r.status, r.outcome.slice(0, 200));
+      return new Response(r.status === 200 ? 'ok' : 'rejected', { status: r.status });
     }
 
     if (url.pathname === '/v1/send' && request.method === 'POST') {

@@ -65,7 +65,13 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
     const detail = ev.detail && typeof ev.detail === 'object' ? JSON.stringify(ev.detail).slice(0, 300) : null;
     const fb: FeedbackInput =
       ev.type === 'bounce'
-        ? { type: 'bounce', kind: isPermanentBounce(subtype) ? 'permanent' : 'transient', email, campaign, source, detail: [subtype, detail].filter(Boolean).join(' ') || null }
+        ? isPermanentBounce(subtype)
+          ? { type: 'bounce', kind: 'permanent', email, source, detail: [subtype, detail].filter(Boolean).join(' ') || null }
+          : {
+              type: 'bounce', kind: 'transient', email, campaign, source, detail: [subtype, detail].filter(Boolean).join(' ') || null,
+              // 只有郵差層明說是信箱層級（mailbox）或內容（content）才帶；其他（一般性、無法判定）不帶＝不累計。
+              ...(ev.cause === 'mailbox' || ev.cause === 'content' ? { cause: ev.cause } : {}),
+            }
         : ev.type === 'complaint'
           ? { type: 'complaint', email, source, detail }
           : { type: 'delivery', email };

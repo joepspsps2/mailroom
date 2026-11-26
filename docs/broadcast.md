@@ -1,8 +1,9 @@
 # Newsletter broadcasting (preview)
 
 Sends one newsletter issue to a frozen list, in waves, at a steady pace, with automatic brakes. Code: `src/broadcast/`
-(exported as `@joelincc/mailroom/broadcast`), tables: migration `0006_broadcast.sql`. Status: **preview** — the only
-built-in newsletter postman is a fake one; a real provider plugs in through the `Postman` interface.
+(exported as `@joelincc/mailroom/broadcast`), tables: migration `0006_broadcast.sql`. Status: **preview** — built-in newsletter
+postmans: Amazon SES (see [docs/ses.md](ses.md)) and a fake one for development; another provider plugs in through the
+`Postman` interface.
 
 Everything below uses example values (`mail.example.com`, a 2,000-person list). Your real numbers belong in your private config.
 
@@ -129,7 +130,8 @@ Provider feedback enters through one function, whatever the provider:
 await ingestEvent(db, { provider, providerEventId, providerMessageId, type, subtype, at, email, campaign, contact }, { feedback })
 ```
 
-`type` is one of `send`, `delivery`, `bounce` (`subtype` `Permanent…` / `Transient` / `Undetermined`), `complaint`,
+`type` is one of `send`, `delivery`, `bounce` (`subtype` `Permanent…` / `Transient` / `Undetermined`; a transient
+bounce may carry `cause: "mailbox"` or `"content"` — only `mailbox` counts toward the transient-bounce streak), `complaint`,
 `reject`, `delay`, `open`, `click`, `unsubscribe`. Re-deliveries of the same `providerEventId` are ignored. Without a
 `feedback` hook, bounces, complaints and deliveries go through `applyFeedback` (see [docs/unsubscribe.md](unsubscribe.md)).
 An `unsubscribe` event that names an issue unsubscribes the person from that issue's list.
@@ -139,7 +141,7 @@ An `unsubscribe` event that names an issue unsubscribes the person from that iss
 `FakePostman` sends nothing. Addresses whose local part is `success`, `bounce`, `complaint`, `ooto` or
 `suppressionlist` (optionally `+tag`) behave like a provider's mailbox simulator and produce the matching events after a
 short delay. `rules` can make any address answer `temporary`, `permanent`, `throttle`, `account_paused`, `delay`,
-`soft_bounce` or `crash` (throw), optionally only the first `times` calls. In the Worker, set
+`soft_bounce` (a mailbox-full transient bounce) or `crash` (throw), optionally only the first `times` calls. In the Worker, set
 `NEWSLETTER_POSTMAN = "fake"`; its events come back through the broadcast queue.
 
 ## Worker setup

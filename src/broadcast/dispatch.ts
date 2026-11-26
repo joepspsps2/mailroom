@@ -102,13 +102,19 @@ async function todayRow(ctx: Ctx): Promise<ThrottleRow> {
       const l = await postman.limits();
       const perDay = Number.isFinite(l.perDay) && l.perDay > 0 ? Math.floor(l.perDay) : 0;
       const perSecond = Number.isFinite(l.perSecond) && l.perSecond > 0 ? l.perSecond : 0;
+      // 郵差的 24 小時上限是「滾動」的：昨天晚上寄的也佔今天的額度。有報已用量時，今天最多再寄
+      //「今天已寄＋郵差那邊剩下的」（今天已寄本來就含在已用量裡）。
+      let cap = Math.min(ctx.cfg.maxPerDay, perDay);
+      if (typeof l.sentLast24h === 'number' && Number.isFinite(l.sentLast24h) && l.sentLast24h >= 0) {
+        cap = Math.min(cap, (row?.sent ?? 0) + Math.max(0, perDay - Math.ceil(l.sentLast24h)));
+      }
       await db
         .prepare(
           `INSERT INTO throttle_days (domain, day, sent, "limit", per_second, provider_per_day, enforcement, refreshed_at) VALUES (?, ?, 0, ?, ?, ?, ?, ?)
            ON CONFLICT (domain, day) DO UPDATE SET "limit" = excluded."limit", per_second = excluded.per_second, provider_per_day = excluded.provider_per_day,
              enforcement = excluded.enforcement, refreshed_at = excluded.refreshed_at`,
         )
-        .bind(domain, day, Math.min(ctx.cfg.maxPerDay, perDay), perSecond, perDay, String(l.enforcement ?? 'UNKNOWN').slice(0, 40), ctx.iso)
+        .bind(domain, day, cap, perSecond, perDay, String(l.enforcement ?? 'UNKNOWN').slice(0, 40), ctx.iso)
         .run();
     } catch (e) {
       console.error('postman limits failed', e instanceof Error ? e.message : 'unknown');
