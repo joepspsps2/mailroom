@@ -12,6 +12,7 @@ what each secret can do if it leaks, and what you should harden.
 | The operator (`/v1/drill`, `/v1/lookup`, `/v1/report`, `/v1/unsuppress`) | `DRILL_TOKEN` | Send drill mail to any address (fixed text plus a caller-chosen `site` label), read status fields and per-domain counts, lift suppressions — and, as a side effect, find out whether a given address is on the suppression list. 20 requests/min, 200/day in total. |
 | Resend (`POST /webhooks/resend`) | Svix signature, 5-minute window, event id de-duplicated | Update delivery status, add hard bounces and complaints to the suppression list. |
 | Cloudflare Email Sending events | Arrive on your own queue | Same as above. |
+| Amazon SES via SNS (`POST /webhooks/ses`) | SNS signature (SignatureVersion 2 by default) with a certificate fetched only from `sns.<region>.amazonaws.com`, topic ARN allowlist, 7-day window, SNS message id de-duplicated. Off (404) unless `SES_SNS_TOPIC_ARNS` is set. | Same as above, plus confirm its own SNS subscription. See [ses.md](ses.md). |
 | Everyone else | — | `GET /` returns a plain-text health check. `POST /webhooks/resend` answers 401, 411 or 413. Everything else is 404. |
 
 Mailroom does **not** check that a recipient opted in, does not scan message content, and does not sanitise HTML.

@@ -102,13 +102,19 @@ async function todayRow(ctx: Ctx): Promise<ThrottleRow> {
       const l = await postman.limits();
       const perDay = Number.isFinite(l.perDay) && l.perDay > 0 ? Math.floor(l.perDay) : 0;
       const perSecond = Number.isFinite(l.perSecond) && l.perSecond > 0 ? l.perSecond : 0;
+      // 郵差的 24 小時上限是「滾動」的：昨天晚上寄的也佔今天的額度。有報已用量時，今天最多再寄
+      //「今天已寄＋郵差那邊剩下的」（今天已寄本來就含在已用量裡）。
+      let cap = Math.min(ctx.cfg.maxPerDay, perDay);
+      if (typeof l.sentLast24h === 'number' && Number.isFinite(l.sentLast24h) && l.sentLast24h >= 0) {
+        cap = Math.min(cap, (row?.sent ?? 0) + Math.max(0, perDay - Math.ceil(l.sentLast24h)));
+      }
       await db
         .prepare(
           `INSERT INTO throttle_days (domain, day, sent, "limit", per_second, provider_per_day, enforcement, refreshed_at) VALUES (?, ?, 0, ?, ?, ?, ?, ?)
            ON CONFLICT (domain, day) DO UPDATE SET "limit" = excluded."limit", per_second = excluded.per_second, provider_per_day = excluded.provider_per_day,
              enforcement = excluded.enforcement, refreshed_at = excluded.refreshed_at`,
         )
-        .bind(domain, day, Math.min(ctx.cfg.maxPerDay, perDay), perSecond, perDay, String(l.enforcement ?? 'UNKNOWN').slice(0, 40), ctx.iso)
+        .bind(domain, day, cap, perSecond, perDay, String(l.enforcement ?? 'UNKNOWN').slice(0, 40), ctx.iso)
         .run();
     } catch (e) {
       console.error('postman limits failed', e instanceof Error ? e.message : 'unknown');
@@ -490,7 +496,7 @@ const ack = (outcome: string): ConsumeResult => ({ action: 'ack', outcome });
 type LedgerOutcome =
   | { kind: 'sent' | 'duplicate'; messageId: number }
   | { kind: 'in_flight' | 'uncertain'; messageId: number }
-  | { kind: 'failed'; messageId: number; postman: 'temporary' | 'permanent' | 'throttled' | 'account_paused'; error: string }
+  | { kind: 'failed'; messageId: number; postman: 'temporary' | 'permanent' | 'throttled' | 'daily_quota' | 'account_paused'; error: string }
   | { kind: 'rejected'; error: string };
 
 /** 記帳＋交郵差（電子報版）。帳本列先建（sending），交郵差、再回寫；不重搶放久的 sending 列。 */
@@ -675,6 +681,13 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
         await progress();
         return { action: 'retry', delaySeconds: cfg.throttleRetrySeconds, outcome: 'throttled' };
       }
+      if (out.postman === 'daily_quota') {
+        // 郵差說今天額度用完（例：別的寄信也佔了滾動 24 小時額度、或已用量讀數落後）：今天不再放水，明天照常。
+        await db.prepare("UPDATE throttle_days SET \"limit\" = MIN(\"limit\", sent), paused = 1, reason = 'daily_limit' WHERE domain = ? AND day = ?").bind(deps.domain, day).run();
+        await setState('planned', { messageId: out.messageId, error: out.error });
+        await progress();
+        return ack('daily_limit');
+      }
       if (out.postman === 'account_paused') {
         await setState('planned', { messageId: out.messageId, error: out.error });
         await brake(ctx, c.id, 'brake:provider_account_paused');
@@ -687,6 +700,13 @@ export async function consume(deps: BroadcastDeps, body: unknown): Promise<Consu
       }
       await setState('failed', { messageId: out.messageId, error: out.error, attemptsPlus: 1 });
       await progress();
+      if (out.postman === 'permanent') {
+        // 一封接一封都被郵差永久拒收（例：寄件身分沒驗證、沙盒裡收件人沒驗證）多半是設定問題，不是讀者的問題：停下來查，不要把整份名單逐一記失敗。
+        const recent = (await db.prepare("SELECT state, error FROM campaign_recipients WHERE campaign_id = ? AND state IN ('done', 'failed') ORDER BY done_at DESC LIMIT ?").bind(c.id, cfg.permanentStreak).all<{ state: string; error: string | null }>()).results;
+        if (recent.length >= cfg.permanentStreak && recent.every((x) => x.state === 'failed' && / permanent /.test(` ${x.error ?? ''} `))) {
+          await brake(ctx, c.id, `brake:permanent_streak:${cfg.permanentStreak}`);
+        }
+      }
       return ack(`failed_${out.postman}`);
   }
 }
