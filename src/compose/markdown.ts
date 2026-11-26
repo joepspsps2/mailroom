@@ -163,6 +163,29 @@ function autolink(text: string): Inline[] {
   return out.map((n) => (n.t === 'text' ? { t: 'text', v: decodeEntities(n.v) } : n));
 }
 
+/**
+ * 行內程式碼的唯一判定（解析器與註解剝除共用，兩邊不會對「哪裡是程式碼」有不同看法）。
+ * s[i] 是一串反引號的開頭：找下一串「剛好一樣長」的反引號當收尾；空白行（段落分隔）擋住，不能跨段。
+ * 找不到＝不是程式碼（回 null，反引號當一般字元）。
+ */
+export function codeSpanAt(s: string, i: number): { open: number; close: number; end: number } | null {
+  let n = 0;
+  while (s[i + n] === '`') n++;
+  let j = i + n;
+  while (j < s.length) {
+    if (s[j] === '\n' && /^[ \t]*\n/.test(s.slice(j + 1))) return null; // 空白行＝段落結束
+    if (s[j] === '`') {
+      let m = 0;
+      while (s[j + m] === '`') m++;
+      if (m === n) return { open: n, close: j, end: j + m };
+      j += m;
+      continue;
+    }
+    j++;
+  }
+  return null;
+}
+
 export function parseInline(s: string, problems: Problem[], depth = 0): Inline[] {
   const out: Inline[] = [];
   let buf = '';
@@ -189,13 +212,19 @@ export function parseInline(s: string, problems: Problem[], depth = 0): Inline[]
       continue;
     }
     if (ch === '`') {
-      const end = s.indexOf('`', i + 1);
-      if (end > i) {
+      const span = codeSpanAt(s, i);
+      if (span) {
         flush();
-        out.push({ t: 'code', v: protectBraces(s.slice(i + 1, end)) });
-        i = end + 1;
+        out.push({ t: 'code', v: protectBraces(s.slice(i + span.open, span.close)) });
+        i = span.end;
         continue;
       }
+      // 沒配對的反引號：整串當一般字元
+      let n = 0;
+      while (s[i + n] === '`') n++;
+      buf += '`'.repeat(n);
+      i += n;
+      continue;
     }
     if (ch === '!' && s[i + 1] === '[') {
       const close = matchBracket(s, i + 1);
@@ -477,96 +506,119 @@ function parseBlocks(lines: string[], problems: Problem[]): Block[] {
  * 拿掉 HTML 註解（<!-- … -->）：行首、段落下一行、清單項目裡、行內、跨行，位置都一樣處理（CommonMark 的註解可以打斷段落）。
  * 程式碼框（``` 或 ~~~）裡的不動。找不到結尾的註解＝記 error，且保留原文（不能把後面整段吃掉）。
  */
-/** 在一行裡找 needle，跳過成對反引號包住的行內程式碼（沒配對的反引號當一般字元）。 */
-function indexOutsideCode(line: string, needle: string): number {
+const MARK = '\uE001';
+
+/**
+ * 拿掉 HTML 註解（<!-- … -->）：行首、段落下一行、清單項目裡、行內、跨行，位置都一樣處理（CommonMark 的註解可以打斷段落）。
+ * 「程式碼」的判定：程式碼框（``` 或 ~~~，頂格、清單內、引言內都算；開頭與收尾用同一套前綴規則）與行內程式碼（共用 codeSpanAt，
+ * 含跨行、不同長度的反引號；反斜線跳脫的反引號不開頭）。程式碼裡的 <!-- 不動。
+ * 找不到結尾的註解＝記 error，且保留原文（不能把後面整段吃掉）。
+ */
+export function stripComments(lines: string[], problems: Problem[]): string[] {
+  const fenceLead = (l: string) => l.replace(/^[\s>]*/, '');
+  // 切成「程式碼框」與「文字」兩種區段
+  const segs: { code: boolean; lines: string[] }[] = [];
   let i = 0;
-  while (i < line.length) {
-    if (line[i] === '`') {
-      let n = 0;
-      while (line[i + n] === '`') n++;
-      const ticks = '`'.repeat(n);
-      const close = line.indexOf(ticks, i + n);
-      // 找到同樣長度的收尾反引號才算行內程式碼（中間不能剛好是更長的一串）
-      let c = close;
-      while (c >= 0 && line[c + n] === '`') c = line.indexOf(ticks, c + n + 1);
-      if (c >= 0) {
-        i = c + n;
-        continue;
+  while (i < lines.length) {
+    const f = lines[i].match(LOOSE_FENCE);
+    if (f) {
+      const mark = f[1];
+      const seg = [lines[i++]];
+      while (i < lines.length) {
+        const l = lines[i++];
+        seg.push(l);
+        if (fenceLead(l).startsWith(mark)) break;
       }
-      i += n;
+      segs.push({ code: true, lines: seg });
+    } else {
+      const seg: string[] = [];
+      while (i < lines.length && !LOOSE_FENCE.test(lines[i])) seg.push(lines[i++]);
+      segs.push({ code: false, lines: seg });
+    }
+  }
+  const out: string[] = [];
+  for (const seg of segs) {
+    if (seg.code) {
+      out.push(...seg.lines);
       continue;
     }
-    if (line.startsWith(needle, i)) return i;
-    i++;
-  }
-  return -1;
-}
-
-export function stripComments(lines: string[], problems: Problem[]): string[] {
-  const out: string[] = [];
-  let fence: string | null = null;
-  let open: { at: number; line: string } | null = null; // 註解開始的位置：輸出第幾行、原文
-  const origin: string[] = [];
-  for (const line of lines) {
-    if (!open) {
-      const f = line.match(LOOSE_FENCE); // 清單、引言裡縮排的程式碼框也算（解析器之後會一樣處理）
-      if (fence) {
-        out.push(line);
-        if (line.trim().startsWith(fence)) fence = null;
+    const text = seg.lines.join('\n');
+    let res = '';
+    let pos = 0;
+    let unclosedAt = -1;
+    while (pos < text.length) {
+      const ch = text[pos];
+      if (ch === '\\' && (text[pos + 1] === '`' || text[pos + 1] === '<')) {
+        res += ch + text[pos + 1]; // 反斜線跳脫的反引號不開程式碼、跳脫的 < 不開註解（與解析器一致）
+        pos += 2;
         continue;
       }
-      if (f) {
-        fence = f[1];
-        out.push(line);
+      if (ch === '`') {
+        const span = codeSpanAt(text, pos);
+        if (span) {
+          res += text.slice(pos, span.end);
+          pos = span.end;
+        } else {
+          let n = 0;
+          while (text[pos + n] === '`') n++;
+          res += text.slice(pos, pos + n);
+          pos += n;
+        }
         continue;
       }
-    }
-    const wasOpen = open !== null;
-    let rest = line;
-    let kept = '';
-    let removed = false;
-    let reset = false;
-    for (;;) {
-      if (open) {
-        const e = rest.indexOf('-->');
+      if (text.startsWith('<!--', pos)) {
+        const e = text.indexOf('-->', pos + 4);
         if (e < 0) {
-          rest = '';
-          removed = true;
+          unclosedAt = pos;
+          res += text.slice(pos);
+          pos = text.length;
           break;
         }
-        rest = rest.slice(e + 3);
-        open = null;
-        removed = true;
-      } else {
-        const st = indexOutsideCode(rest, '<!--');
-        if (st < 0) {
-          kept += rest;
-          break;
-        }
-        kept += rest.slice(0, st);
-        rest = rest.slice(st + 4);
-        removed = true;
-        open = { at: out.length, line };
-        origin.length = 0;
-        origin.push(line);
-        reset = true;
+        res += MARK;
+        pos = e + 3;
+        continue;
       }
+      res += ch;
+      pos++;
     }
-    if (wasOpen && open && !reset) origin.push(line);
-    out.push(removed && kept.trim() === '' ? '' : kept);
-  }
-  if (open) {
-    // 沒收尾：記 error，並把註解開始那行之後的原文放回去
-    problems.push({ code: 'unclosed_comment', severity: 'error', message: 'HTML 註解（<!--）沒有收尾，後面的內容會被吃掉', where: clip(open.line) });
-    out.length = open.at;
-    out.push(...origin);
+    if (unclosedAt >= 0) {
+      const startLine = text.slice(0, unclosedAt).split('\n').length - 1;
+      problems.push({ code: 'unclosed_comment', severity: 'error', message: 'HTML 註解（<!--）沒有收尾，後面的內容會被吃掉', where: clip(seg.lines[startLine] ?? '') });
+    }
+    // 整行只剩註解＝空行；行內註解＝直接拿掉
+    for (const l of res.split('\n')) out.push(l.includes(MARK) && l.split(MARK).join('').trim() === '' ? '' : l.split(MARK).join(''));
   }
   return out;
+}
+
+/** 保險：解析完之後，程式碼以外的文字節點若還有 <!--，代表註解剝除與解析器對「程式碼在哪」的看法不一致 → 記 error，不放行。 */
+function leakedComments(blocks: Block[], problems: Problem[]): void {
+  const inl = (ns: Inline[]) => {
+    for (const n of ns) {
+      if (n.t === 'text' && n.v.includes('<!--')) {
+        problems.push({ code: 'comment_leaked', severity: 'error', message: '有 HTML 註解沒被剝掉，會原樣出現在信裡（疑似程式碼寫法被誤判）；請檢查附近的反引號與程式碼框', where: clip(n.v.slice(Math.max(0, n.v.indexOf('<!--') - 10))) });
+      } else if (n.t === 'strong' || n.t === 'em' || n.t === 'link') inl(n.c);
+      else if (n.t === 'image' && n.alt.includes('<!--')) problems.push({ code: 'comment_leaked', severity: 'error', message: '圖片替代文字裡有未剝掉的 HTML 註解', where: clip(n.alt) });
+    }
+  };
+  const walk = (bs: Block[]) => {
+    for (const b of bs) {
+      if (b.t === 'p' || b.t === 'h') inl(b.c);
+      else if (b.t === 'quote') walk(b.c);
+      else if (b.t === 'list') for (const it of b.items) walk(it);
+      else if (b.t === 'table') {
+        for (const c of b.head) inl(c);
+        for (const r of b.rows) for (const c of r) inl(c);
+      } else if (b.t === 'image' && b.alt.includes('<!--')) problems.push({ code: 'comment_leaked', severity: 'error', message: '圖片替代文字裡有未剝掉的 HTML 註解', where: clip(b.alt) });
+    }
+  };
+  walk(blocks);
 }
 
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const problems: Problem[] = [];
   const blocks = parseBlocks(stripComments(body.split('\n'), problems), problems);
+  if (!problems.some((p) => p.code === 'unclosed_comment')) leakedComments(blocks, problems);
   return { blocks, problems, frontmatter: fm };
 }
