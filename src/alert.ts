@@ -1,5 +1,5 @@
 // 告警出口：讀者要求退訂卻沒退成時，把「誰、哪張券」送給人工。通用 webhook（POST JSON），不綁任何服務；網址與口令由設定注入。
-// 不 import cloudflare:*。沒設網址時照樣把完整內容寫進 log（Worker 的 log 只有帳號擁有者看得到），並在啟動時警告。
+// 不 import cloudflare:*。沒設網址時照樣把內容寫進 log（Worker 的 log 只有帳號擁有者看得到；完整券不進 log），並在啟動時警告。
 
 export type AlertEvent = 'unsub_mail_no_token' | 'unsub_token_invalid' | 'unsub_write_failed';
 
@@ -11,6 +11,15 @@ export interface AlertConfig {
   fetch?: typeof fetch;
 }
 
+/** 收件端（人、聊天頻道）看到的欄位：去掉控制字元（含換行）、截長，免得外人寄來的字串在告警裡搞出假內容。 */
+const clean = (v: unknown, max: number): string | undefined =>
+  typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').trim().slice(0, max) : undefined;
+
+/** 同一個 isolate 一分鐘最多送幾則告警（超過只寫 log）：沒有人能靠亂打網址把告警頻道灌爆。 */
+const MAX_ALERTS_PER_MIN = 20;
+let windowStart = 0;
+let windowCount = 0;
+
 export interface AlertPayload {
   event: AlertEvent;
   /** 信封寄件人（收信退訂時才有）。 */
@@ -18,6 +27,8 @@ export interface AlertPayload {
   subject?: string | null;
   /** 完整退訂券（驗不過或寫入失敗時）；有了它人工才能判斷是誰。 */
   token?: string;
+  /** 券裡讀得出的名單與聯絡人編號（形狀對才有）；不用完整券也足以人工處理。 */
+  claims?: { list: string; contactId: number; campaign?: string | null };
   via?: 'page' | 'mailto';
 }
 
@@ -29,11 +40,24 @@ const SUMMARY: Record<AlertEvent, string> = {
 
 /** 送告警。永遠不丟錯；回傳有沒有送出。 */
 export async function sendAlert(cfg: AlertConfig, payload: AlertPayload, now: () => Date = () => new Date()): Promise<boolean> {
-  const body = { ...payload, at: now().toISOString(), text: `${SUMMARY[payload.event]}${payload.from ? ` (from ${payload.from})` : ''}`, content: '' };
+  const at = now();
+  const from = clean(payload.from, 320);
+  const body = {
+    event: payload.event, at: at.toISOString(), via: payload.via, from, subject: payload.subject === null ? null : clean(payload.subject, 200),
+    token: clean(payload.token, 200), claims: payload.claims, text: `${SUMMARY[payload.event]}${from ? ` (from ${from})` : ''}`, content: '',
+  };
   body.content = body.text;
-  // 完整內容一律進 log，不管 webhook 有沒有設／成不成功。
-  console.error('unsub alert', JSON.stringify(body));
+  // log 不放完整券（它能替那個人退訂）：只放券前 8 字與讀得出的名單／聯絡人編號，足夠人工處理；完整券只走有口令的 webhook。
+  // 主旨裡通常就是那張券（有時還被編碼過），有券時 log 不放主旨。
+  const short = body.token ? `${body.token.slice(0, 8)}…` : undefined;
+  const redacted = { ...body, token: short, subject: body.token && body.subject ? '[subject carries the token]' : body.subject };
+  console.error('unsub alert', JSON.stringify(redacted));
   if (!cfg.url) return false;
+  if (at.getTime() - windowStart >= 60_000) { windowStart = at.getTime(); windowCount = 0; }
+  if (++windowCount > MAX_ALERTS_PER_MIN) {
+    console.error('unsub alert rate limited');
+    return false;
+  }
   if (!/^https:\/\/[^\s]+$/i.test(cfg.url)) {
     console.error('unsub alert webhook must be https');
     return false;
@@ -64,4 +88,4 @@ export function warnIfNoAlert(url: string | undefined): boolean {
   return false;
 }
 /** 測試用：重置一次性警告。 */
-export function resetAlertWarning(): void { warned = false; }
+export function resetAlertWarning(): void { warned = false; windowStart = 0; windowCount = 0; }

@@ -133,3 +133,38 @@ test('sendAlert：只收 https 網址；warnIfNoAlert 回傳有沒有設', async
   q.restore();
   assert.equal(warnIfNoAlert('https://x.example.com'), true);
 });
+
+test('網頁路徑的壞券：亂打的字串不告警；形狀對但簽章不對才告警（帶名單與聯絡人編號）', async () => {
+  const { handleUnsubRequest } = await import('../src/unsub.ts');
+  const { unsubConfig } = await import('../src/unsub-wiring.ts');
+  const { db, token } = await setup();
+  const sent: Sent[] = [];
+  const cfg = unsubConfig(env, fakeFetch(200, sent));
+  const q = quiet();
+  for (const junk of ['abc', 'a.b.c.d.e', 'x'.repeat(100)]) assert.equal((await handleUnsubRequest(db, cfg, new Request(`https://u.example.com/u/${junk}`)))!.status, 404);
+  assert.equal(sent.length, 0);
+  const [f, list, id, camp] = token.split('.');
+  const wrongSig = [f, list, id, camp, 'A'.repeat(43)].join('.');
+  assert.equal((await handleUnsubRequest(db, cfg, new Request(`https://u.example.com/u/${wrongSig}`)))!.status, 404);
+  q.restore();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.event, 'unsub_token_invalid');
+  assert.equal(sent[0].body.via, 'page');
+  assert.deepEqual(sent[0].body.claims, { list: 'weekly', contactId: 1, campaign: null });
+});
+
+test('告警：log 不放完整券（完整券只走 webhook）；控制字元與換行被清掉；一分鐘超過 20 則只寫 log', async () => {
+  const { db, token } = await setup();
+  const sent: Sent[] = [];
+  const q = quiet();
+  const forged = token.slice(0, -2) + (token.endsWith('AA') ? 'BB' : 'AA');
+  await handleEmailMessage(db, env, mail(forged, 'evil@example.org\nINJECTED: yes').m, fakeFetch(200, sent));
+  assert.ok(!q.lines.some((l) => l.includes(forged)), 'log 不該有完整券');
+  assert.ok(q.lines.some((l) => l.includes(forged.slice(0, 8))));
+  assert.equal(sent[0].body.token, forged);
+  assert.ok(!/[\n\r]/.test(sent[0].body.from + sent[0].body.text));
+  for (let i = 0; i < 30; i++) await handleEmailMessage(db, env, mail(`hello ${i}`).m, fakeFetch(200, sent));
+  q.restore();
+  assert.equal(sent.length, 20);
+  assert.ok(q.lines.some((l) => l.includes('rate limited')));
+});

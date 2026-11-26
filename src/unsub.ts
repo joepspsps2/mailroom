@@ -62,8 +62,8 @@ export async function signUnsubToken(secrets: UnsubSecrets, claims: UnsubClaims)
   return `${payload}.${b64url(sig)}`;
 }
 
-/** 驗退訂券；任何一步不對（格式、簽章、鑰匙都不符）都回 null，不說哪裡錯。 */
-export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): Promise<UnsubClaims | null> {
+/** 只看形狀、不驗簽章：格式對的券才會有名單與聯絡人編號。告警用它判斷「像真券但簽章不對」與「純亂打」。 */
+export function unsubTokenShape(token: unknown): (UnsubClaims & { sig: string; payload: string }) | null {
   if (typeof token !== 'string' || token.length > 160) return null;
   const parts = token.split('.');
   if (parts.length !== 5) return null;
@@ -72,7 +72,14 @@ export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): P
   if (campaign !== '-' && !CAMPAIGN_ID.test(campaign)) return null;
   const contactId = parseInt(id36, 36);
   if (!Number.isSafeInteger(contactId) || contactId < 1) return null;
-  const payload = parts.slice(0, 4).join('.');
+  return { list, contactId, campaign: campaign === '-' ? null : campaign, sig, payload: parts.slice(0, 4).join('.') };
+}
+
+/** 驗退訂券；任何一步不對（格式、簽章、鑰匙都不符）都回 null，不說哪裡錯。 */
+export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): Promise<UnsubClaims | null> {
+  const shape = unsubTokenShape(token);
+  if (!shape) return null;
+  const { list, contactId, campaign, sig, payload } = shape;
   const sigBytes = fromB64url(sig);
   // 簽章的最後一個字元有幾個位元用不到，改它不會改變簽章內容；只收標準寫法，一張券只有一種長相。
   if (b64url(sigBytes.buffer) !== sig) return null;
@@ -80,7 +87,7 @@ export async function verifyUnsubToken(secrets: UnsubSecrets, token: unknown): P
     if (!secret || secret.length < MIN_SECRET) continue;
     // crypto.subtle.verify 是定時比對。
     if (await crypto.subtle.verify('HMAC', await hmacKey(secret, 'verify'), sigBytes, new TextEncoder().encode(payload))) {
-      return { list, contactId, campaign: campaign === '-' ? null : campaign };
+      return { list, contactId, campaign };
     }
   }
   return null;

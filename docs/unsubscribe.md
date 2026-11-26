@@ -69,14 +69,14 @@ A reader who wrote in has clearly asked to stop, so these three cases raise an a
 | Case | Alert `event` | What else happens |
 |---|---|---|
 | Mail without a token | `unsub_mail_no_token` | accepted; a person handles it |
-| Token fails verification (also on the web page) | `unsub_token_invalid` | page returns 404 |
+| Token fails verification | `unsub_token_invalid` | page returns 404. From the web page only tokens of the right shape (a plausible token with a bad signature) alert; random strings typed into the URL are only logged |
 | Database write failed while handling a mail | `unsub_write_failed` | the mail is **rejected** with `setReject` (permanent SMTP rejection carrying a short "use the link instead" text), so the sender is told it did not work |
 
 The alert is a plain webhook, not tied to any service: `POST` JSON `{ event, at, from?, subject?, token?, via?, text, content }` to `UNSUB_ALERT_WEBHOOK`
 (https only; optional `UNSUB_ALERT_TOKEN` is sent as a Bearer token; 5-second timeout; a failing webhook never breaks request handling).
-`token` is the full token so a person can tell who it was. `text` and `content` hold the same one-line summary so common chat webhooks work through a small relay.
+`token` is the full token and `claims` (`list`, `contactId`, `campaign`) is read from it when its shape is right, so a person can tell who it was. Control characters are stripped from `from`, `subject` and `token`; at most 20 alerts per minute are sent per Worker instance (the rest are only logged), so nobody can flood the channel. `text` and `content` hold the same one-line summary so common chat webhooks work through a small relay.
 
-**If `UNSUB_ALERT_WEBHOOK` is not set**, nothing is lost silently: the same full payload is written to the Worker log (`console.error`, visible only to the account owner),
+**If `UNSUB_ALERT_WEBHOOK` is not set**, nothing is lost silently: the same payload is written to the Worker log (`console.error`, visible only to the account owner; the log carries only the first 8 characters of the token plus `claims`, since a full token can unsubscribe that person),
 and a warning is logged once per isolate (and on each scheduled run).
 
 Why `setReject` and not `throw`: the Cloudflare docs only state that `setReject()` is a permanent SMTP error; they do not say what the sender sees when `email()` throws, so the documented call is used.

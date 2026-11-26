@@ -2,7 +2,7 @@
 
 import { type Db } from './core.ts';
 import { sendAlert, warnIfNoAlert, type AlertConfig } from './alert.ts';
-import { handleUnsubMail, pageText, unsubSecrets, type UnsubHandlerConfig, type UnsubMailOutcome } from './unsub.ts';
+import { handleUnsubMail, pageText, unsubSecrets, unsubTokenShape, type UnsubHandlerConfig, type UnsubMailOutcome } from './unsub.ts';
 
 export interface UnsubEnv {
   UNSUB_TOKEN_SECRET?: string;
@@ -21,8 +21,13 @@ export function unsubConfig(env: UnsubEnv, fetchFn?: typeof fetch): UnsubHandler
     secrets: unsubSecrets(env.UNSUB_TOKEN_SECRET, env.UNSUB_TOKEN_SECRET_PREVIOUS),
     text: pageText(env.UNSUB_PAGE as string | undefined),
     // 券驗不過：讀者想退訂卻沒成，送完整券給人工。
-    onInvalidToken: async (token, via, ctx) => void (await sendAlert(alert, { event: 'unsub_token_invalid', token, via, from: ctx?.from, subject: ctx?.subject })),
-    onWriteFailed: async ({ token, from }) => void (await sendAlert(alert, { event: 'unsub_write_failed', token, from, via: 'mailto' })),
+    // 網頁上亂打的網址（形狀就不對）不告警，只留 log；形狀對但簽章不對、或是收信退訂（人刻意寄的）才送。
+    onInvalidToken: async (token, via, ctx) => {
+      const shape = unsubTokenShape(token);
+      if (via === 'page' && !shape) return void console.warn('unsub page token malformed', token.slice(0, 8));
+      await sendAlert(alert, { event: 'unsub_token_invalid', token, via, from: ctx?.from, subject: ctx?.subject, claims: shape ? { list: shape.list, contactId: shape.contactId, campaign: shape.campaign } : undefined });
+    },
+    onWriteFailed: async ({ token, claims, from }) => void (await sendAlert(alert, { event: 'unsub_write_failed', token, from, via: 'mailto', claims })),
   };
 }
 
