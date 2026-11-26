@@ -26,7 +26,7 @@ test(`隨機探測：${N} 份（種子 ${SEED}），三條不變式零違反`, (
 });
 
 // ───────── 五輪覆核留下的每一個反例＋本輪探測找到的寫法：固定下來，跟參照渲染器比對 ─────────
-// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的；「複審」＝修完後第二次審查找到的；「三審」＝第三次審查找到的。
+// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的；「複審」＝修完後第二次審查找到的；「三審」「四審」＝第三、四次審查找到的。
 // 名稱、原稿（只有正文）、預期：null＝正確處理（不記 error），字串＝必須記這個 error 擋下
 // 行首結構用 tab 的寫法（引言 > 後、清單記號後、清單續行）一律擋下：主站沒有這種文章，網站的 tab 換算判不準
 const REVIEW_CASES: [string, string, string | null][] = [
@@ -133,6 +133,23 @@ const REVIEW_CASES: [string, string, string | null][] = [
   ['三審 表格遇到不從 1 開始的清單就結束', '| BODY1X |\n| --- |\n| BODY2X |\n2. BODY3X\n\nBODY4X | BODY5X', null],
   ['三審 表格後清單裡沒收尾的框', '| BODY1X |\n| --- |\n| BODY2X |\n2.  ~~~\n  BODY3X | BODY4X', 'unclosed_fence'],
   ['三審 偽註解吞掉圖片的網址', '> | ![ `CODE1X` `` <?x> CMT2X ](https://example.com/x)  | ?> |', 'unsupported_html'],
+  ['四審 多段腳註的縮排續段', 'BODY0X[^1]\n\n[^1]: BODY1X\n\n    <!-- CMT2X -->', 'unsupported_syntax'],
+  ['四審 註解裡的假程式碼框不影響腳註檢查', '<!-- CMT1X\n```\n-->\n\nBODY2X\n\n[^1]: CMT3X', 'unsupported_syntax'],
+  ['四審 實體字不算腳註引用', 'BODY0X &#91;^1]\n\n[^1]: CMT1X', 'unsupported_syntax'],
+  ['四審 角括號網址裡不算腳註引用', 'BODY0X <https://example.com/[^1]>\n\n[^1]: CMT1X', 'unsupported_syntax'],
+  ['四審 括號裡跳脫不算腳註引用', 'BODY0X [\\^A]\n\n[^A]: CMT1X', 'unsupported_syntax'],
+  ['四審 註解區塊尾巴不算腳註引用', '<!-- CMT0X --> BODY1X [^2]\n\n[^2]: CMT2X', 'unsupported_syntax'],
+  ['四審 腳註定義變成標題', '[^a]: CMT1X [^a]\n===', 'unsupported_syntax'],
+  ['四審 連結文字裡的腳註引用', '[BODY0X[^1]](https://example.com/BODY1X)\n\n[^1]: BODY2X', 'unsupported_syntax'],
+  ['四審 腳註內容是縮排程式碼', 'BODY0X[^1]\n\n[^1]:     <!--CODE1X-->', 'unsupported_syntax'],
+  ['四審 清單裡程式碼框的 tab 不擋', '- BODY1X\n\n  ```make\n  all:\n  \tgcc CODE2X\n  ```', null],
+  ['四審 引言裡程式碼框的 tab 不擋', '> ```go\n> \tCODE1X\n> ```', null],
+  ['四審 正常腳註：強調裡引用、大小寫不同、隔空行', 'BODY1X[^a] *BODY2X[^b]*\n\n[^a]: BODY3X\n[^b]: BODY4X\n\n[^c]: BODY5X\n\nBODY6X[^C]', null],
+  ['四審 網址裡的 [^x] 不算腳註引用', 'https://example.com/[^a] BODY1X\n\n[^a]: CMT2X', 'unsupported_syntax'],
+  ['四審 只有空白的引言行裡有 tab', 'BODY1X\n> \t\n    CODE2X <!-- CODE3X -->', 'unsupported_syntax'],
+  ['四審 腳註定義後直接接表格', '[^a]: CMT1X\n| BODY2X[^a] | b |\n|---|---|', 'unsupported_syntax'],
+  ['四審 腳註後空行再接縮 3 格的行', 'BODY0X[^1]\n\n[^1]: BODY1X\n\n   `CODE2X <!-- CODE3X -->`', 'unsupported_syntax'],
+  ['四審 腳註內容又是定義', 'BODY0X[^A]\n\n[^A]: [^1]: CMT1X', 'unsupported_syntax'],
   ['複審 縮排碼後不從 1 開始的有序清單', '\t<!--CODE1X-->\n2)     <!--CMT2X--> BODY3X', 'unsupported_syntax'],
 ];
 

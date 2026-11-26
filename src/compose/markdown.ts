@@ -99,8 +99,22 @@ interface Ctx {
   problems: Problem[];
   hidden: number;
   inCode: number;
+  /** 行首結構（縮排、> 後、清單記號後）用了 tab 的第一行（判不準，最後記 error）。 */
+  tab: string;
+  /** 合格的腳註定義標籤（小寫，依出現順序，重複的也留著）。 */
+  defs: string[];
+  /** 正文裡真正的腳註引用標籤（小寫；不含定義那幾行裡的）。 */
+  refs: Set<string>;
+  inDef: boolean;
+  inLink: number;
 }
-const scratch = (): Ctx => ({ problems: [], hidden: 0, inCode: 0 });
+const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0 });
+const scratch = newCtx;
+/** 行首空白裡有 tab。 */
+const tabLead = (l: string) => /^[ \t]*\t/.test(l.startsWith(LAZY) ? l.slice(1) : l);
+const noteTab = (ctx: Ctx, l: string) => {
+  if (!ctx.tab) ctx.tab = l;
+};
 const marks = (s: string) => s.split('<!--').length - 1;
 
 /** CommonMark 可用反斜線跳脫的字元（ASCII 標點）。 */
@@ -336,13 +350,26 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         }
       }
     }
+    // 腳註引用 [^名稱]：記下來（判斷定義有沒有被引用）；字面照留。連結文字裡的引用網站不做連結，判不準，記 error
+    if (ch === '[') {
+      const fn = s.slice(i).match(/^\[\^([^\]\s\\]+)\]/);
+      // 接在網址後面（https://…[^1]）的不算：網站會把整串變成自動連結
+      const inUrl = /(?::\/\/|^www\.)/i.test(s.slice(0, i).match(/\S*$/)![0]);
+      if (fn && !inUrl && s[i + fn[0].length] !== '(' && s[i + fn[0].length] !== ':') {
+        if (!ctx.inDef) ctx.refs.add(fn[1].toLowerCase());
+        if (ctx.inLink) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '連結文字裡有腳註引用，網站上不會做成連結；請把腳註移到連結外面', where: clip(fn[0]) });
+      }
+    }
     if (ch === '[' && depth < 3) {
       const close = matchBracket(s, i);
       if (close > 0 && s[close + 1] === '(') {
         const u = readParenUrl(s, close + 1);
         if (u) {
           flush();
-          out.push({ t: 'link', href: u[0], c: parseInline(s.slice(i + 1, close), ctx, depth + 1) });
+          ctx.inLink++;
+          const c = parseInline(s.slice(i + 1, close), ctx, depth + 1);
+          ctx.inLink--;
+          out.push({ t: 'link', href: u[0], c });
           i = u[1];
           continue;
         }
@@ -370,7 +397,10 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
         const closeAt = findMark(s, i + a[0].length, '</a>');
         if (href && closeAt > 0) {
           flush();
-          out.push({ t: 'link', href: decodeEntities(href[1] ?? href[2] ?? ''), c: parseInline(s.slice(i + a[0].length, closeAt), ctx, depth + 1) });
+          ctx.inLink++;
+          const c = parseInline(s.slice(i + a[0].length, closeAt), ctx, depth + 1);
+          ctx.inLink--;
+          out.push({ t: 'link', href: decodeEntities(href[1] ?? href[2] ?? ''), c });
           i = closeAt + 4;
           continue;
         }
@@ -479,6 +509,18 @@ function stripCols(line: string, n: number, col = 0): string {
     } else break;
   }
   return line.slice(i);
+}
+
+/** 拿掉行首 n 欄時，拿掉的部分有沒有碰到 tab（剩下的 tab 屬於內容，不算）。 */
+function consumedHasTab(line: string, n: number, col = 0): boolean {
+  if (line.startsWith(LAZY)) line = line.slice(1);
+  let c = col;
+  for (let i = 0; i < line.length && c < col + n; i++) {
+    if (line[i] === ' ') c++;
+    else if (line[i] === '\t') return true;
+    else break;
+  }
+  return false;
 }
 
 /** 縮排不到 4 欄（不是程式碼）的行：行首空白換成等寬的空格，給只認空格的區塊判斷用。 */
@@ -639,17 +681,26 @@ function rawTail(rest: string, ctx: Ctx): Block | null {
   return v ? { t: 'p', c: [{ t: 'text', v }] } : null;
 }
 
+/** 腳註定義（合格的單行寫法、任何寫法、內容是區塊寫法）。 */
+const FN_DEF = /^\[\^([^\]\s\\]+)\]:/;
+const FN_DEF_ANY = /^ {0,3}\[\^[^\]]*\]:/;
+const FN_DEF_BLOCK = /^(?:\s{4,}\S|\s*\[[^\]]*\]:|\s*(?:>|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|`{3,}|~{3,}|#{1,6}(?:\s|$)|\|))/;
+/** 最近一段合格腳註定義結束在哪一行（只在最外層用）：之後空行＋縮 4 欄的行＝網站上屬於腳註的續段，判不準。 */
+let lastDefEnd = -1;
+
 /** 段落：從 lines[start] 收到空行或能打斷段落的行為止；下一行是 === 或 --- ＝標題（setext）。回傳下一個要看的行。 */
 function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], col: number): number {
   const n = lines.length;
   const unlazy = (l: string) => (l.startsWith(LAZY) ? l.slice(1) : l);
   const para: string[] = [unlazy(lines[start])];
+  const raw: string[] = [lines[start]];
   let i = start + 1;
   let setext = 0;
   let tabTable = false;
   while (i < n) {
     const l = lines[i];
     if (l.trim() === '') break;
+    if (tabLead(l)) noteTab(ctx, l);
     if (tabTableAmbiguous(lines[i - 1], l, col)) tabTable = true;
     if (!l.startsWith(LAZY)) {
       const sx = indentCols(l, col) < 4 ? normLead(l, col).match(SETEXT) : null;
@@ -661,10 +712,25 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], co
       if (interrupts(l, lines[i + 1], true, col) || (BLOCK_HTML.test(normLead(l, col)) && EMBED_TAG.test(l))) break;
     }
     para.push(unlazy(l));
+    raw.push(l);
     i++;
   }
   if (tabTable) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '表格分隔列前面用 tab 縮排，網站上的排法判不準；請改用空格或不縮排', where: clip(para[0]) });
+  // 腳註定義：只有「最外層、從第 0 欄寫起、整段每一行都是單行定義、內容不是區塊寫法、不是標題」判得準
+  const isDef = (l: string) => FN_DEF.test(l) && !FN_DEF_BLOCK.test(l.replace(FN_DEF, ''));
+  const defLike = para.some((l) => FN_DEF_ANY.test(l));
+  let def = false;
+  if (defLike) {
+    // 後面要接空行或文末：被別的區塊（表格、清單…）打斷時，網站會把那個區塊也收進腳註
+    if (col === 0 && !setext && (i >= n || lines[i].trim() === '') && raw.every((l) => !l.startsWith(LAZY) && isDef(l))) {
+      def = true;
+      for (const l of raw) ctx.defs.push(l.match(FN_DEF)![1].toLowerCase());
+    } else ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '腳註定義要從行首寫起、前面空一行、一則一行（不能縮排、不能放在引言或清單裡、不能接在段落後面或變成標題，內容不能是清單、引言、程式碼）；不然網站上的顯示判不準', where: clip(para.find((l) => FN_DEF_ANY.test(l))!) });
+  }
+  ctx.inDef = def;
   const inline = parseInline(para.join('\n').trim(), ctx);
+  ctx.inDef = false;
+  if (def) lastDefEnd = i;
   if (setext) blocks.push({ t: 'h', level: setext, c: inline });
   // 整段只有一張圖（或一個包著圖的連結）＝圖片區塊
   else if (inline.length === 1 && inline[0].t === 'image') blocks.push({ t: 'image', src: inline[0].src, alt: inline[0].alt });
@@ -700,6 +766,12 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
     }
     const prevIndentedCode = afterIndentedCode;
     afterIndentedCode = false;
+    // 行首結構用 tab：縮排程式碼只看拿掉的那 4 欄，其他行看整段行首空白
+    if (indentCols(lines[i], col) >= 4 ? consumedHasTab(lines[i], 4, col) : tabLead(lines[i])) noteTab(ctx, lines[i]);
+    // 腳註定義後面空行、再接縮 4 欄的行：網站上那是腳註的續段（多段腳註），判不準
+    if (col === 0 && lastDefEnd >= 0 && i > lastDefEnd && lines.slice(lastDefEnd, i).every((l) => l.trim() === '') && indentCols(lines[i]) >= 1) {
+      ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '腳註定義後面接了縮排的行（可能是多段腳註），網站上的顯示判不準；請把腳註寫成一則一行、後面的段落不要縮排', where: clip(lines[i]) });
+    }
     if (line.startsWith(LAZY)) {
       i = paragraph(lines, i, ctx, blocks, col);
       if (blocks[blocks.length - 1]?.t === 'p') paraEnd = i;
@@ -710,7 +782,10 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
     // 縮排 4 格以上＝程式碼（段落中間的縮排行不算，那是段落續行）
     if (indentCols(lines[i], col) >= 4) {
       const body: string[] = [];
-      while (i < n && (lines[i].trim() === '' || indentCols(lines[i], col) >= 4)) body.push(stripCols(lines[i++], 4, col));
+      while (i < n && (lines[i].trim() === '' || indentCols(lines[i], col) >= 4)) {
+        if (consumedHasTab(lines[i], 4, col)) noteTab(ctx, lines[i]);
+        body.push(stripCols(lines[i++], 4, col));
+      }
       while (body.length && body[body.length - 1].trim() === '') body.pop();
       const v = body.join('\n');
       ctx.inCode += marks(v);
@@ -809,13 +884,16 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
       while (i < n) {
         const l = normLead(lines[i], col);
         if (QUOTE.test(l)) {
+          if (tabLead(lines[i]) || /^ {0,3}>\t/.test(l)) noteTab(ctx, lines[i]);
           const q = stripQuote(l, col, qcol);
+          if (q.rest.trim() === '' && l.includes('\t')) noteTab(ctx, lines[i]); // 只有空白的引言行裡有 tab
           if (q.ambiguous) ambiguous = true;
           inner.push(q.rest);
           i++;
           continue;
         }
         if (l.trim() !== '' && inner.length > 0 && !lazyBreaks(l, col) && parseBlocks(inner, scratch(), qcol, interrupting).open) {
+          if (tabLead(lines[i])) noteTab(ctx, lines[i]);
           inner.push(l.startsWith(LAZY) ? l : LAZY + l);
           i++;
           continue;
@@ -835,6 +913,8 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
       const rows: Inline[][][] = [];
       // 表格不是段落：任何清單項目（不從 1 開始、空項目也算）都會結束表格
       while (i < n && lines[i].trim() !== '' && indentCols(lines[i], col) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1], false, col) && !listMarker(normLead(lines[i], col), col)) {
+        if (tabLead(lines[i])) noteTab(ctx, lines[i]);
+        if (FN_DEF_ANY.test(normLead(lines[i], col))) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '表格裡有腳註定義，網站上的顯示判不準', where: clip(lines[i]) });
         const cells = splitRow(lines[i++]);
         while (cells.length < head.length) cells.push('');
         for (const extra of cells.slice(head.length)) ctx.hidden += marks(extra); // 多出來的格子網站上也不顯示（表格裡再出現像表頭的兩行，也只是一般的列）
@@ -850,6 +930,8 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
       const items: Block[][] = [];
       let cur = first;
       while (true) {
+        // 清單記號後面用 tab
+        if (/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ ]*\t/.test(normLead(lines[i], col))) noteTab(ctx, lines[i]);
         const itemLines: string[] = [cur.first];
         i++;
         while (i < n) {
@@ -866,11 +948,13 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
             break;
           }
           if (indentCols(l, col) >= cur.content) {
+            if (consumedHasTab(l, cur.content, col)) noteTab(ctx, l);
             itemLines.push(stripCols(l, cur.content, col));
             i++;
             continue;
           }
           if (!lazyBreaks(l, col) && parseBlocks(itemLines, scratch(), col + cur.content, interrupting && items.length === 0).open) {
+            if (tabLead(l)) noteTab(ctx, l);
             itemLines.push(l.startsWith(LAZY) ? l : LAZY + l); // 懶惰續行
             i++;
             continue;
@@ -903,70 +987,24 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
   return { blocks, open: open && !unclosedHtml };
 }
 
-/**
- * 判不準就擋下的兩類寫法（主站現有文章都沒有，照網站逐一模仿只會越補越多）：
- * 1. 行首的結構（縮排、> 之後、清單記號之後）用 tab：tab 欄位在網站的引擎裡跟著容器層層換算，排法判不準。程式碼框裡的 tab 不算。
- * 2. 腳註：網站只顯示「被正文引用到」的定義（放在文末），沒被引用的整段藏起來；信裡定義照段落印出。
- *    只放行：定義從行首第 0 欄寫起、前一行是空行或另一個定義、標籤不含空白且不重複（不分大小寫）、正文（不含程式碼、註解、網址、定義本身）真的引用到。
- */
-function checkAmbiguous(body: string, blocks: Block[], ctx: Ctx): void {
+/** 最後的總檢查：行首結構用 tab、腳註定義有沒有被引用與重複。 */
+function finalChecks(ctx: Ctx): void {
   const fail = (message: string, where: string) => ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message, where: clip(where) });
-  const PREFIX = /^(?:[ \t]*(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*/;
-  const DEF_LINE = /^([ \t>*+\-\d.)]*)\[\^([^\]]*)\]:/;
-  const lines = body.split('\n');
-  const labels: string[] = [];
-  let fence: Fence | null = null;
-  let tabWhere = '';
-  let fnBad = '';
-  lines.forEach((l, i) => {
-    if (fence) {
-      if (fenceCloses(l, fence)) fence = null;
-      return;
-    }
-    // 只認從第 0 欄開始的程式碼框（縮排的 ``` 可能是清單裡的框在收尾，不能當成新框把後面略過）
-    const f = /^[`~]/.test(l) ? fenceOpen(l) : null;
-    if (f) {
-      fence = f;
-      return;
-    }
-    if (!tabWhere && l.trim() !== '' && PREFIX.exec(l)![0].includes('\t')) tabWhere = l;
-    const d = l.match(DEF_LINE);
-    if (!d) return;
-    const prev = i > 0 ? lines[i - 1] : '';
-    if (d[1] !== '' || /\s/.test(d[2]) || (prev.trim() !== '' && !/^\[\^[^\]]*\]:/.test(prev))) {
-      if (!fnBad) fnBad = l;
-    } else labels.push(d[2].toLowerCase());
-  });
-  if (tabWhere) fail('行首的縮排、引言 > 或清單記號後面用了 tab，網站上的排法判不準；請改用空格（程式碼框裡的 tab 不受影響）', tabWhere);
-  if (fnBad) fail('腳註定義要從行首寫起、前面空一行（不能縮排、不能放在引言或清單裡、不能接在段落後面，標籤不能有空白），不然網站上的顯示判不準', fnBad);
-  if (/\\\[\^/.test(body)) fail('原稿有跳脫的腳註引用（\\[^…]），網站上的顯示判不準；請改寫', body.match(/\\\[\^[^\]]*\]?/)![0]);
-  if (!labels.length) return;
-  const texts: string[] = [];
-  const walk = (x: unknown): void => {
-    if (Array.isArray(x)) return x.forEach(walk);
-    if (!x || typeof x !== 'object') return;
-    const o = x as { t?: string; v?: unknown };
-    if (o.t === 'code') return;
-    if (o.t === 'text' && typeof o.v === 'string') texts.push(o.v.toLowerCase());
-    for (const v of Object.values(o)) if (v && typeof v === 'object') walk(v);
-  };
-  for (const b of blocks) {
-    const c0 = b.t === 'p' ? b.c[0] : undefined;
-    if (!(c0?.t === 'text' && /^\[\^[^\]\s]+\]:/.test(c0.v))) walk(b);
-  }
+  if (ctx.tab) fail('行首的縮排、引言 > 或清單記號後面用了 tab，網站上的排法判不準；請改用空格（程式碼框裡的 tab 不受影響）', ctx.tab);
   const seen = new Set<string>();
-  for (const label of labels) {
+  for (const label of ctx.defs) {
     if (seen.has(label)) fail(`腳註 [^${label}] 定義了兩次，網站只顯示第一個；請刪掉重複的`, `[^${label}]:`);
     seen.add(label);
-    if (!texts.some((t) => t.split(`[^${label}]`).slice(1).some((after) => !after.startsWith(':')))) fail(`腳註 [^${label}] 有定義但正文沒引用，網站上不顯示；請刪掉或在正文引用它`, `[^${label}]:`);
+    if (!ctx.refs.has(label)) fail(`腳註 [^${label}] 有定義但正文沒引用，網站上不顯示；請刪掉或在正文引用它`, `[^${label}]:`);
   }
 }
 
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
-  const ctx: Ctx = { problems: [], hidden: 0, inCode: 0 };
+  const ctx = newCtx();
+  lastDefEnd = -1;
   const { blocks } = parseBlocks(body.split('\n'), ctx);
-  checkAmbiguous(body, blocks, ctx);
+  finalChecks(ctx);
   // 對帳：原文每一個 <!--，不是被當成註解藏起來，就是落在程式碼裡；對不上＝有一個註解符號跑進了正文（或內容不見了），擋下。
   const total = marks(body);
   if (total !== ctx.hidden + ctx.inCode && !ctx.problems.some((p) => p.code === 'unclosed_comment')) {
