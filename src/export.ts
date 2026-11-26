@@ -9,7 +9,7 @@
 // 設計重點：
 // - 讀取本身不改任何東西：同一個 cursor 重拉一定拿到同一批（除了新進來的）。中途失敗的人只要從上次存好的 cursor 再來，不會漏也不會重。
 // - 「分析端存好了」才呼叫 ack；ack 只是標記（exported_at），不影響下一次從哪裡拉，拉到哪由分析端自己記 cursor。
-// - 事件只帶 contact_id，不帶信箱；要對到信箱用 members 快照。
+// - 事件只帶 contact_id，不帶信箱（記事件時與匯出時都會把 detail 裡信箱形狀的字串遮掉）；要對到信箱用 members 快照。
 // - D1 的寫入是一筆一筆依序提交，AUTOINCREMENT 的 id 看得到 N+1 就代表 N 已提交，依 id 往後拉不會跳過。
 // - 自己一組速度上限（_export），不跟其他管理入口搶額度。
 
@@ -24,6 +24,14 @@ const PATH = /^\/v1\/export\/(events|campaigns|recipients|members)$/;
 const ACK_PATH = '/v1/export/events/ack';
 const LIST_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const CAMPAIGN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
+/** 事件的 detail 不該帶信箱；已存的舊資料也在這裡把信箱形狀的字串遮成 [email]（@頻道 這類不算信箱，原樣保留）。 */
+export function scrubEmails(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  const text = JSON.stringify(value);
+  return text.includes('@') ? JSON.parse(text.replace(EMAIL, '[email]')) : value;
+}
 
 const ndjson = (rows: unknown[], next: string | null): Response =>
   new Response(rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''), {
@@ -66,7 +74,7 @@ export async function exportEvents(db: Db, cursor: number, limit: number): Promi
     .all<Record<string, unknown> & { id: number; detail: string | null }>();
   const more = r.results.length > limit;
   const page = r.results.slice(0, limit);
-  return { rows: page.map((e) => ({ ...e, detail: parseJson(e.detail) })), next: more ? String(page[page.length - 1].id) : null };
+  return { rows: page.map((e) => ({ ...e, detail: scrubEmails(parseJson(e.detail)) })), next: more ? String(page[page.length - 1].id) : null };
 }
 
 /** 標記 id ≤ through 的事件已匯出。through 不能超過目前最大 id（防呼叫端算錯把還沒拉的也標掉）。 */

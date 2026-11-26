@@ -154,6 +154,7 @@ export type UnsubOutcome = { status: 'unsubscribed'; listName: string | null } |
  */
 export async function unsubscribeByClaims(db: Db, claims: UnsubClaims, source: 'link' | 'one_click' | 'mailto', reason?: UnsubReason | null, now?: () => Date): Promise<UnsubOutcome> {
   const t = isoNow(now);
+  const before = await db.prepare('SELECT status FROM list_members WHERE list_id = ? AND contact_id = ?').bind(claims.list, claims.contactId).first<{ status: string }>();
   const row = await db
     .prepare(
       `UPDATE list_members SET
@@ -168,6 +169,17 @@ export async function unsubscribeByClaims(db: Db, claims: UnsubClaims, source: '
     .bind(t, source, reason ?? null, reason ?? null, t, claims.list, claims.contactId)
     .first();
   if (!row) return { status: 'not_found' };
+  // 只在「這一刻才從訂閱變退訂」時記一筆事件（重複點擊、重送不重複記）；記不進去不能害退訂失敗（舊資料庫可能還沒有 events 表）。
+  if (before?.status === 'subscribed') {
+    try {
+      await db
+        .prepare(`INSERT INTO events (provider, provider_event_id, campaign_id, contact_id, type, at, detail) VALUES ('self', ?, ?, ?, 'unsubscribe', ?, ?) ON CONFLICT (provider_event_id) DO NOTHING`)
+        .bind(`unsub:${claims.list}:${claims.contactId}:${t}`, claims.campaign ?? null, claims.contactId, t, JSON.stringify({ via: source, list: claims.list, ...(reason ? { reason } : {}) }))
+        .run();
+    } catch (e) {
+      console.error('unsubscribe event not recorded', e instanceof Error ? e.message : 'unknown');
+    }
+  }
   const list = await db.prepare('SELECT name FROM lists WHERE id = ?').bind(claims.list).first<{ name: string }>();
   return { status: 'unsubscribed', listName: list?.name ?? null };
 }

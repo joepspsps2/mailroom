@@ -113,3 +113,51 @@ test('期別、凍結名單、成員：分頁拿到的就是整張表；凍結�
   assert.ok(mem.every((m) => m.email.endsWith('@example.com')));
   assert.equal(mem.filter((m) => m.status === 'unsubscribed').length >= 1, true);
 });
+
+test('退訂：三條真的退訂路徑各記一筆 unsubscribe 事件，重複退訂不重複記，事件不帶信箱', async () => {
+  const f = await buildFixture({ members: 10, issues: 1 });
+  const { signUnsubToken, unsubSecrets, handleUnsubRequest, handleUnsubMail, unsubscribeByClaims } = await import('../src/unsub.ts');
+  const SECRET = 'unsub-secret-for-tests-0123456789';
+  const secrets = unsubSecrets(SECRET);
+  const cfg = { secrets, now: f.w.now } as never;
+  const events = async (c: number) => (await lines(await exportCall(f.w, 'GET', '/v1/export/events?limit=5000'))).filter((e) => e.type === 'unsubscribe' && e.contact_id === c);
+  // 1. 退訂頁 POST（link）
+  const t4 = await signUnsubToken(secrets, { list: 'weekly', contactId: 4, campaign: 'weekly-163' });
+  const post = (t: string, body: string) => handleUnsubRequest(f.w.db, cfg, new Request(`https://x.example.com/u/${t}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }));
+  assert.equal((await post(t4, 'reason=too_many'))!.status, 200);
+  await post(t4, 'reason=too_many'); // 重複
+  let e4 = await events(4);
+  assert.equal(e4.length, 1);
+  assert.deepEqual([e4[0].campaign_id, e4[0].detail.via, e4[0].detail.reason], ['weekly-163', 'link', 'too_many']);
+  // 2. 一鍵退訂
+  const t5 = await signUnsubToken(secrets, { list: 'weekly', contactId: 5 });
+  await post(t5, 'List-Unsubscribe=One-Click');
+  const e5 = await events(5);
+  assert.equal(e5.length, 1);
+  assert.equal(e5[0].detail.via, 'one_click');
+  // 3. 寫信退訂（mailto）
+  const t6 = await signUnsubToken(secrets, { list: 'weekly', contactId: 6 });
+  await handleUnsubMail(f.w.db, cfg, { from: 'reader@example.com', subject: `unsubscribe ${t6}` });
+  const e6 = await events(6);
+  assert.equal(e6.length, 1);
+  assert.equal(e6[0].detail.via, 'mailto');
+  // 本來就退訂的人再退一次：不記
+  await unsubscribeByClaims(f.w.db, { list: 'weekly', contactId: 6 }, 'link', null, f.w.now);
+  assert.equal((await events(6)).length, 1);
+  // 不存在的人：不記、也不出錯
+  assert.deepEqual(await unsubscribeByClaims(f.w.db, { list: 'weekly', contactId: 9999 }, 'link', null, f.w.now), { status: 'not_found' });
+  assert.equal(JSON.stringify([...e4, ...e5, ...e6]).includes('@'), false);
+});
+
+test('事件 detail 裡的信箱在記錄時與匯出時都被遮掉，@頻道 這類不是信箱的原樣保留', async () => {
+  const f = await buildFixture({ members: 10, issues: 1 });
+  const { ingestEvent } = await import('../src/broadcast/index.ts');
+  await ingestEvent(f.w.db, { provider: 'self', providerEventId: 'scrub-1', type: 'click', at: '2026-10-05T00:00:00.000Z', campaign: 'weekly-163', contact: '5', detail: { url: 'https://video.example.com/@channel', mail: 'mailto:someone@example.com', nested: { who: 'a.b+c@sub.example.org' } } }, { now: f.w.now });
+  // 直接寫進資料庫的舊資料（沒遮過）匯出時也遮
+  await f.w.db.prepare("INSERT INTO events (provider, provider_event_id, campaign_id, contact_id, type, at, detail) VALUES ('self', 'legacy-1', 'weekly-163', 5, 'click', '2026-10-05T00:00:01.000Z', ?)").bind(JSON.stringify({ text: 'bounce for user@example.com' })).run();
+  const rows = await lines(await exportCall(f.w, 'GET', '/v1/export/events?limit=5000'));
+  const a = rows.find((e) => e.provider_event_id === 'scrub-1')!;
+  assert.deepEqual(a.detail, { url: 'https://video.example.com/@channel', mail: 'mailto:[email]', nested: { who: '[email]' } });
+  assert.equal(rows.find((e) => e.provider_event_id === 'legacy-1')!.detail.text, 'bounce for [email]');
+  assert.equal(rows.some((e) => JSON.stringify(e).match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[a-z]/)), false);
+});

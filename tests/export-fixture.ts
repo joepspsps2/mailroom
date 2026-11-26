@@ -6,6 +6,7 @@ import { routeExport } from '../src/export.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { routeLists } from '../src/list-routes.ts';
+import { unsubscribeByClaims } from '../src/unsub.ts';
 
 export const TOKEN = 'export-token-for-tests';
 /** 預設從過去的一個週日（台北 09:00）開始，讓分析端測試時「寄出已滿 7 天」成立。 */
@@ -56,7 +57,7 @@ export async function buildFixture(opts: { members?: number; issues?: number; st
       // 開信：約 45%；其中一部分是 Apple 預載（寄出後幾秒就開、帶 ua 標記）；有人開兩次（同一人多筆事件，算一個開信者）
       if (pick(c, issueNo, 'open') < 0.45) {
         const apple = pick(c, issueNo, 'apple') < 0.25;
-        await ev('open', 1, apple ? 4_000 : 3_600_000 + Math.floor(pick(c, issueNo, 'when') * 7_200_000), apple ? { ua: 'AppleMail MPP prefetch' } : { ua: 'Mozilla/5.0' });
+        await ev('open', 1, apple ? 4_000 : 3_600_000 + Math.floor(pick(c, issueNo, 'when') * 7_200_000), apple ? { ua: 'AppleMail', prefetch: true } : { ua: 'Mozilla/5.0', ...(c % 11 === 0 ? { note: 'mailto:someone@example.com', ref: 'https://video.example.com/@channel' } : {}) });
         exp.open++;
         if (apple) exp.open_apple++;
         if (pick(c, issueNo, 'open2') < 0.3) await ev('open', 2, 86_400_000, { ua: 'Mozilla/5.0' });
@@ -71,7 +72,11 @@ export async function buildFixture(opts: { members?: number; issues?: number; st
         exp.click_suspect += 1;
       }
       if (c % 7 === 0 && issueNo === issues.length) {
-        await ev('unsubscribe', 1, 90_000_000, { via: 'link' });
+        // 退訂走真的退訂路徑（退訂頁 POST 背後那個函式），事件由引擎自己記，不手塞
+        const keep = w.clock.t;
+        w.clock.t = sentAt + 90_000_000;
+        await unsubscribeByClaims(w.db, { list: 'weekly', contactId: c, campaign: id }, 'link', null, w.now);
+        w.clock.t = keep;
         exp.unsubscribe++;
       }
     }
