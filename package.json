@@ -10,7 +10,9 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./compose": "./src/compose/index.ts"
+    "./compose": "./src/compose/index.ts",
+    "./unsub": "./src/unsub.ts",
+    "./feedback": "./src/feedback.ts"
   },
   "files": [
     "src",

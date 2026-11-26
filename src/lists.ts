@@ -7,7 +7,7 @@ import { type Db, type Stmt } from './core.ts';
 /** D1 的 batch（一次交多條、整批成功或整批失敗）是選配：沒有就逐條跑。D1Database 本身就符合。 */
 export type ListDb = Db & { batch?(statements: Stmt[]): Promise<Array<{ meta: { changes?: number } }>> };
 
-export const UNSUB_SOURCES = ['link', 'one_click', 'api', 'import', 'import-removed', 'complaint'] as const;
+export const UNSUB_SOURCES = ['link', 'one_click', 'mailto', 'api', 'import', 'import-removed', 'complaint'] as const;
 export type UnsubSource = (typeof UNSUB_SOURCES)[number];
 /** 還沒有分群資料的新加入者。 */
 export const NEW_SEGMENT = '新進觀察群';
@@ -170,7 +170,9 @@ export async function listStatus(db: ListDb, input: { list: string; email: strin
   return m ? 'subscribed' : 'not_found';
 }
 
-export interface MemberRow { email: string; status: 'subscribed' | 'unsubscribed'; subscribedAt: string | null; unsubscribedAt: string | null; unsubSource: string | null; source: string | null; segment: string | null; segmentLabel: string | null }
+export interface MemberRow { email: string; status: 'subscribed' | 'unsubscribed'; subscribedAt: string | null; unsubscribedAt: string | null; unsubSource: string | null; unsubReason: string | null; source: string | null; segment: string | null; segmentLabel: string | null;
+  /** 這個信箱在全域拒收名單（硬退信、檢舉、「全部不要」）＝不會寄；與 listStatus 的 blocked 同口徑。 */
+  suppressed: boolean }
 export interface MembersPage { members: MemberRow[]; next: string | null }
 
 /** 分頁列出（依 contact id 遞增，一頁最多 1,000）。cursor＝上一頁回的 next；next 為 null＝沒有下一頁。 */
@@ -186,17 +188,18 @@ export async function listMembers(db: ListDb, input: { list: string; status?: 's
   const rows = await db
     .prepare(
       `SELECT m.contact_id AS id, c.email AS email, m.status AS status, m.subscribed_at AS subscribedAt, m.unsubscribed_at AS unsubscribedAt,
-              m.unsub_source AS unsubSource, m.source AS source, m.segment AS segment, m.segment_label AS segmentLabel
+              m.unsub_source AS unsubSource, m.unsub_reason AS unsubReason, m.source AS source, m.segment AS segment, m.segment_label AS segmentLabel,
+              EXISTS (SELECT 1 FROM suppressions s WHERE s.email = c.email AND s.reason IN ('hard_bounce', 'complaint', 'unsubscribe')) AS suppressed
          FROM list_members m JOIN contacts c ON c.id = m.contact_id
         WHERE m.list_id = ? AND m.contact_id > ? ${input.status ? 'AND m.status = ?' : ''}
         ORDER BY m.contact_id LIMIT ?`,
     )
     .bind(...[input.list, after, ...(input.status ? [input.status] : []), limit + 1])
-    .all<MemberRow & { id: number }>();
+    .all<Omit<MemberRow, 'suppressed'> & { id: number; suppressed: number }>();
   const more = rows.results.length > limit;
   const page = rows.results.slice(0, limit);
   const next = more ? String(page[page.length - 1].id) : null;
-  return { members: page.map(({ id: _id, ...m }) => m), next };
+  return { members: page.map(({ id: _id, suppressed, ...m }) => ({ ...m, suppressed: !!suppressed })), next };
 }
 
 // ---------- 分群欄位寫入 ----------
