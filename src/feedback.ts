@@ -3,7 +3,9 @@
 //
 // 規則：
 // - 永久退信 → 全域拒收 hard_bounce（所有信都不寄，包含登入類通知信）。
-// - 檢舉 → 全域拒收 complaint（同上），並把這個人在所有名單標 unsubscribed（unsub_source='complaint'）。
+// - 檢舉（交易類信件，scope 'all'，預設）→ 全域拒收 complaint（同上），並把這個人在所有名單標 unsubscribed（unsub_source='complaint'）。
+// - 檢舉（電子報那類信件，scope 'marketing'）→ 只擋電子報：拒收原因記 unsubscribe（＝「所有電子報都不要」，交易信照寄），
+//   detail 記 complaint；一樣把這個人在所有名單標 unsubscribed。讀者拒絕的是定期寄送，不是登入信。
 // - 暫時性退信 → 不擋；信箱層級（cause＝mailbox）的，同一人連續 3 期（三個不同的期別、中間沒有送達）→ 當硬退信處理；內容被拒這類不累計。
 // - 送達 → 清掉這個人的暫時退信紀錄（連續中斷）。
 // 全部可重複執行：同一則事件送兩次，結果一樣。
@@ -29,7 +31,14 @@ export type FeedbackEvent =
       source: string;
       detail?: string | null;
     }
-  | { type: 'complaint'; email: string; source: string; detail?: string | null }
+  | {
+      type: 'complaint';
+      email: string;
+      source: string;
+      detail?: string | null;
+      /** 被檢舉的是哪一類信：'marketing'（電子報、歡迎信）只擋電子報；'all'（預設，交易類信件或分不出來）擋所有信。 */
+      scope?: 'all' | 'marketing';
+    }
   | { type: 'delivery'; email: string };
 
 export type TransientCause = 'mailbox' | 'content';
@@ -37,6 +46,7 @@ export type TransientCause = 'mailbox' | 'content';
 export type FeedbackOutcome =
   | 'hard_bounce'
   | 'complaint'
+  | 'complaint_marketing'
   | 'transient_counted'
   | 'transient_promoted'
   | 'transient_no_campaign'
@@ -68,7 +78,9 @@ export async function applyFeedback(db: Db, ev: FeedbackEvent, opts: FeedbackOpt
   }
 
   if (ev.type === 'complaint') {
-    await addSuppression(db, email, 'complaint', source, ev.detail ?? null, now);
+    const marketingOnly = ev.scope === 'marketing';
+    if (marketingOnly) await addSuppression(db, email, 'unsubscribe', source, `complaint${ev.detail ? ` ${ev.detail}` : ''}`, now);
+    else await addSuppression(db, email, 'complaint', source, ev.detail ?? null, now);
     // 這個人明白說了「不要」：所有名單一起退出。已經退訂的保留原本的時間與來源。
     await db
       .prepare(
@@ -82,7 +94,7 @@ export async function applyFeedback(db: Db, ev: FeedbackEvent, opts: FeedbackOpt
       .bind(t, t, email)
       .run();
     await db.prepare('DELETE FROM bounce_streaks WHERE email = ?').bind(email).run();
-    return 'complaint';
+    return marketingOnly ? 'complaint_marketing' : 'complaint';
   }
 
   if (ev.type === 'bounce' && ev.kind === 'permanent') {

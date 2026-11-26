@@ -154,12 +154,16 @@ function fmt(a: { name: string | null; addr: string }): string {
 
 /**
  * 名字是加入的人自己填的；歡迎信是加入一發生就寄出的自動信，名字欄可以被拿來夾帶網址或網域（「請到 evil.example 領獎」）。
- * 名字裡有網址、網域、@、斜線或角括號的樣子，就當作沒有名字（整段問候拿掉）。
+ * 名字只收允許清單裡的字元（見下）；其他一律當作沒有名字（整段問候拿掉）。
  */
 export function safeName(name: string | null): string | null {
   if (typeof name !== 'string') return null;
-  if (/[\/:@<>]|www|\.[a-z0-9-]{2,}/i.test(name)) return null;
-  return name;
+  // 允許清單（先 NFKC，全形句點等會變成「.」）：字母、組合記號、空白、撇號、連字號；句點只准跟在單一字母後面（縮寫 J. R.）。最多 40 字。
+  const n = name.normalize('NFKC').trim();
+  if (!n || Array.from(n).length > 40) return null;
+  if (!/^[\p{L}\p{M}\s'\u2019.-]+$/u.test(n)) return null;
+  if (/(?:^|[^\p{L}])\.|\p{L}{2}\.|\.(?!\s|$)/u.test(n)) return null;
+  return n;
 }
 
 export async function consumeWelcome(deps: WelcomeDeps, msg: WelcomeMessage): Promise<WelcomeResult> {

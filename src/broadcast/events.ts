@@ -38,13 +38,13 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
 
   // 對到帳本列與期別／收件人：優先用郵差的信件 id，其次用事件帶的標籤。
   let msg = ev.providerMessageId
-    ? await db.prepare('SELECT id, to_email FROM messages WHERE provider_id = ? LIMIT 1').bind(String(ev.providerMessageId)).first<{ id: number; to_email: string }>()
+    ? await db.prepare('SELECT id, to_email, stream FROM messages WHERE provider_id = ? LIMIT 1').bind(String(ev.providerMessageId)).first<{ id: number; to_email: string; stream?: string }>()
     : null;
   let campaign = typeof ev.campaign === 'string' && ev.campaign ? ev.campaign.slice(0, 64) : null;
   let contact = ev.contact !== undefined && ev.contact !== null && /^\d{1,15}$/.test(String(ev.contact)) ? Number(ev.contact) : null;
   // 事件可能比「帳本記下郵差 id」更早回來；帳本列在交郵差前就建好了，用去重鍵找得到。
   if (!msg && campaign && contact !== null) {
-    msg = await db.prepare("SELECT id, to_email FROM messages WHERE dedupe_key = ? AND stream = 'marketing' LIMIT 1").bind(`c:${campaign}:${contact}`).first<{ id: number; to_email: string }>();
+    msg = await db.prepare("SELECT id, to_email, stream FROM messages WHERE dedupe_key = ? AND stream = 'marketing' LIMIT 1").bind(`c:${campaign}:${contact}`).first<{ id: number; to_email: string; stream?: string }>();
   }
   if (msg && (campaign === null || contact === null)) {
     const r = await db.prepare('SELECT campaign_id, contact_id FROM campaign_recipients WHERE message_id = ? LIMIT 1').bind(msg.id).first<{ campaign_id: string; contact_id: number }>();
@@ -83,7 +83,8 @@ export async function ingestEvent(db: Db, ev: ProviderEvent, opts: IngestOptions
               ...(ev.cause === 'mailbox' || ev.cause === 'content' ? { cause: ev.cause } : {}),
             }
         : ev.type === 'complaint'
-          ? { type: 'complaint', email, source, detail }
+          ? // 這裡是電子報郵差的事件：被檢舉的是電子報那類信，只擋電子報（交易信照寄）。只有對到的帳本列明確是交易類才擋全部。
+            { type: 'complaint', email, source, detail, scope: msg?.stream === 'transactional' ? 'all' : 'marketing' }
           : { type: 'delivery', email };
     if (opts.feedback) await opts.feedback(fb);
     else await applyFeedback(db, fb, { now: () => now });

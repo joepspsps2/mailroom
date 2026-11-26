@@ -88,11 +88,18 @@ Why `setReject` and not `throw`: the Cloudflare docs only state that `setReject(
 | Event | Effect |
 |---|---|
 | `bounce` / `permanent` | `suppressions` `hard_bounce`. Blocks **every** stream, including sign-in notices. List membership is left alone. |
-| `complaint` | `suppressions` `complaint` (blocks every stream) **and** every list the person is on becomes `unsubscribed` with `unsub_source = 'complaint'` (earlier self-unsubscribes keep their own time and source). |
+| `complaint` (`scope: 'all'`, the default: a complaint about transactional mail) | `suppressions` `complaint` (blocks every stream) **and** every list the person is on becomes `unsubscribed` with `unsub_source = 'complaint'` (earlier self-unsubscribes keep their own time and source). |
+| `complaint` with `scope: 'marketing'` (a complaint about a newsletter or welcome mail) | `suppressions` `unsubscribe` with `detail` starting `complaint` — the existing "no newsletters at all" reason: **newsletters stop, sign-in and notification mail keep going** — and every list becomes `unsubscribed` as above. |
 | `bounce` / `transient` | Not blocked. Only `cause: 'mailbox'` bounces (mailbox full, receiving server temporarily down, recipient-side throttling) are counted: one row per (address, issue) in `bounce_streaks`, the same issue twice counts once. **Three different issues in a row** (no delivery in between) → treated as a hard bounce (`detail = transient_streak:3`). `cause: 'content'` (content or attachment rejected, message too large) says nothing about the mailbox and is **not** counted; a missing `cause` or a missing issue id is not counted either. |
 | `delivery` | Clears the address's transient streak. |
 
 Everything is idempotent: the same event twice leaves the same state. Lifting a suppression stays a manual act (`POST /v1/unsuppress`).
+
+Why two kinds of complaint: someone who marks a newsletter as spam is refusing the regular mailing, not their own sign-in links. Blocking
+transactional mail as well would leave them unable to receive anything. After a newsletter complaint the address is refused by every
+newsletter path — the person's own subscribe answers `blocked`, imports skip it, frozen lists and welcome mail skip it, the "pressed by
+mistake" resubscribe is refused — until someone lifts the `unsubscribe` suppression on purpose. Complaints recorded before this
+change stay `complaint` rows and keep blocking every stream.
 
 ### Feeding events in
 
@@ -102,15 +109,15 @@ The provider layer (SNS verification, Resend webhooks, a fake provider in tests)
 ```ts
 await applyFeedback(db, { type: 'bounce', kind: 'permanent', email, source: 'ses', detail: 'NoEmail' });
 await applyFeedback(db, { type: 'bounce', kind: 'transient', email, campaign: 'weekly-7', cause: 'mailbox', source: 'ses' });
-await applyFeedback(db, { type: 'complaint', email, source: 'ses' });
+await applyFeedback(db, { type: 'complaint', email, source: 'ses', scope: 'marketing' });   // about a newsletter
 await applyFeedback(db, { type: 'delivery', email });
 ```
 
 Mapping for SES transient bounces: `General` and `MailboxFull` → `cause: 'mailbox'`; `ContentRejected`, `AttachmentRejected` and `MessageTooLarge` → `cause: 'content'`.
 
-The existing Resend webhook (`webhook.ts`) and Cloudflare event consumer (`cf-events.ts`) already go through `applyFeedback` for hard bounces and complaints, so a complaint from any provider also unsubscribes the person from every list. Their transient bounces and delivery events are not wired in yet (they carry no issue id).
+The existing Resend webhook (`webhook.ts`) and Cloudflare event consumer (`cf-events.ts`) carry transactional mail only and go through `applyFeedback` with the default scope (a complaint there stops every stream), so a complaint from any provider also unsubscribes the person from every list. Events from the newsletter postman (`ingestEvent`: SES, the fake postman) use `scope: 'marketing'`, unless the ledger row they match is a transactional one. Their transient bounces and delivery events are not wired in yet (they carry no issue id).
 
-It returns `hard_bounce`, `complaint`, `transient_counted`, `transient_promoted`, `transient_no_campaign`, `transient_not_counted`, `delivery` or `rejected` (bad address or unknown type).
+It returns `hard_bounce`, `complaint`, `complaint_marketing`, `transient_counted`, `transient_promoted`, `transient_no_campaign`, `transient_not_counted`, `delivery` or `rejected` (bad address or unknown type).
 
 ## Migration
 

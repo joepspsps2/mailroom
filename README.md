@@ -11,7 +11,7 @@ Your apps hand a message to one Worker; the Worker does everything it can to get
 
 - **Multi-provider failover** — Resend first, SMTP2GO as backup (Cloudflare Email Sending optional). A timeout or 5xx from Resend is re-checked once with the same idempotency key before falling back. The design prefers a rare duplicate over a lost message: if a provider times out after actually sending, the fallback provider may deliver a second copy.
 - **Idempotent sends** — every message carries a `(site, key)` pair. Once a key is recorded as `sent`, sending it again returns `duplicate` instead of a second email; a `failed` key can be retried. (A retry after a timeout can produce a duplicate — see above. Resend honours the idempotency key for 24 hours; SMTP2GO has no idempotency key.)
-- **Suppression list** — hard bounces and spam complaints are recorded and future sends to that address are blocked (`suppressed`), across all your apps.
+- **Suppression list** — hard bounces and spam complaints are recorded and future sends to that address are blocked (`suppressed`), across all your apps. A complaint about a newsletter only stops newsletters (sign-in and notification mail keep going).
 - **Bounce / complaint feedback** — Resend webhooks (Svix-signed) and Cloudflare Email Sending events update the ledger and the suppression list.
 - **A D1 ledger** — one row per message: recipient, sender, subject, provider, provider id, outcome, later events. Message bodies are never stored.
 

@@ -241,11 +241,15 @@ test('HTTP 標頭的訊息類型跟內文不一致 → 400；內文不是 JSON �
   assert.equal((await handleSesWebhook(db, '{', opts)).status, 400);
 });
 
-test('檢舉 → 全域拒收 complaint＋所有名單退出；「不是垃圾信」不算檢舉', async () => {
+test('電子報被檢舉 → 只擋電子報（拒收原因 unsubscribe，交易信照寄）＋所有名單退出；「不是垃圾信」不算檢舉', async () => {
   const db = await world();
   const { opts } = setupNet();
   assert.equal((await post(db, signed({ Type: 'Notification', Message: complaint('a@example.com') }), opts)).outcome, 'complaint:recorded');
-  assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), 'complaint');
+  assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), null, 'sign-in and notification mail still go out');
+  assert.equal(await suppressedReason(db, 'a@example.com', 'marketing'), 'unsubscribe');
+  const row = db.raw.prepare("SELECT reason, detail FROM suppressions WHERE email = 'a@example.com'").get() as { reason: string; detail: string };
+  assert.equal(row.reason, 'unsubscribe');
+  assert.match(row.detail, /^complaint/);
   assert.deepEqual({ ...member(db, 'weekly', 'a@example.com') }, { status: 'unsubscribed', unsub_source: 'complaint' });
   assert.deepEqual({ ...member(db, 'promo', 'a@example.com') }, { status: 'unsubscribed', unsub_source: 'complaint' });
   assert.equal((await post(db, signed({ Type: 'Notification', Message: complaint('b@example.com', 'not-spam') }), opts)).outcome, 'ignored:Complaint');
@@ -343,7 +347,8 @@ test('帳本列的收件人跟事件地址不同：不把事件算到那位讀�
   db.raw.prepare("INSERT INTO messages (stream, tier, site, dedupe_key, kind, to_email, from_addr, subject, status, attempts, created_at, updated_at, provider_id) VALUES ('marketing','marketing','newsletter','c:weekly-1:1','newsletter','a@example.com','n@mail.example.com','s','sent',1,'x','x','ses-x')").run();
   await ingestEvent(db, { provider: 'ses', providerEventId: 'e-1', providerMessageId: 'other-id', type: 'complaint', at: '2027-03-01T00:00:00Z', email: 'stranger@example.org', campaign: 'weekly-1', contact: '1' });
   assert.equal(await suppressedReason(db, 'a@example.com', 'transactional'), null);
-  assert.equal(await suppressedReason(db, 'stranger@example.org', 'transactional'), 'complaint');
+  assert.equal(await suppressedReason(db, 'stranger@example.org', 'transactional'), null);
+  assert.equal(await suppressedReason(db, 'stranger@example.org', 'marketing'), 'unsubscribe');
   const ev = db.raw.prepare("SELECT message_id, campaign_id FROM events WHERE provider_event_id = 'e-1'").get() as { message_id: number | null; campaign_id: string | null };
   assert.deepEqual({ ...ev }, { message_id: null, campaign_id: null });
 });

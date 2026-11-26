@@ -8,7 +8,7 @@ Lists are the source of truth for "who gets the newsletter". They live in the sa
 - `contacts`: one row per address, shared by every list. Addresses are trimmed and lower-cased.
 - `lists`: one row per newsletter (`weekly`, `promo`, ...). Create one with `PUT /v1/lists/{id}`.
 - `list_members`: a person's state on one list: `subscribed` or `unsubscribed`, where they came from, an optional engagement group.
-- `suppressions` (existing): global refusals. It only holds hard bounces, complaints and "no newsletters at all".
+- `suppressions` (existing): global refusals. It only holds hard bounces, complaints about transactional mail and "no newsletters at all" (which is also what a complaint about a newsletter records).
   **Unsubscribing from one list is recorded in `list_members` only**, so someone on two lists can leave one and keep the other.
 
 ## Rules
