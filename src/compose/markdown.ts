@@ -162,6 +162,12 @@ function atomEnd(s: string, i: number): number {
   }
   if (ch === '<') {
     if (s.startsWith('<!--', i)) return commentEnd(s, i);
+    // 偽註解（<?…?>、<!X…>、<![CDATA[…]]>）在網站上也是一整塊原始 HTML，不能從中間切開（例如吞掉連結的 ](網址)）
+    const close = s.startsWith('<![CDATA[', i) ? ']]>' : s.startsWith('<?', i) ? '?>' : /^<![A-Za-z]/.test(s.slice(i, i + 3)) ? '>' : '';
+    if (close) {
+      const e = s.indexOf(close, i + 2);
+      if (e >= 0) return e + close.length;
+    }
     const m = s.slice(i).match(AUTOLINK) ?? s.slice(i).match(RAW_TAG);
     if (m) return i + m[0].length;
   }
@@ -435,7 +441,7 @@ const LONE_TAG = /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*?)?\s*\/?>|<\/[A-Z
 /** 瀏覽器當成註解藏起來的另外三種寫法（<?…>、<!X…>、<![CDATA[…]]>）：信裡沒法照做，一律記 error。 */
 const PSEUDO_COMMENT = /<(?:\?|![A-Za-z]|!\[CDATA\[)/;
 /** 參照式連結定義（[名稱]: 網址）：網站上不顯示，信裡不支援，記 error（不然網站看不到的字會寄出去）。 */
-const LINK_REF_DEF = /^ {0,3}\[(?!\^)[^\]]+\]:/;
+const LINK_REF_DEF = /^ {0,3}\[(?!\^[^\]\s]+\]:)[^\]]+\]:/;
 const DIV_WRAPPER = /^ {0,3}(?:<div(?:\s+lang\s*=\s*(?:"[A-Za-z-]*"|'[A-Za-z-]*'))?\s*>|<\/div\s*>)\s*$/i;
 const TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 /** 懶惰續行的記號：引言或清單收進來的「沒縮排、接在段落後面」的行，在內層一律當段落續行（不能變成表頭或標題底線）。 */
@@ -484,8 +490,8 @@ function normLead(line: string, col: number): string {
   return k >= 4 ? line : ' '.repeat(k) + line.slice(lead.length);
 }
 
-/** 拿掉一行引言記號 >（和它後面可省略的一格；後面是 tab 時只吃掉一欄）。qcol＝引言內層的起始欄。 */
-function stripQuote(line: string, col: number, qcol: number): string {
+/** 拿掉一行引言記號 >（和它後面可省略的一格；後面是 tab 時只吃掉一欄）。qcol＝引言內層的起始欄（第一行的）；p＝這一行自己的。 */
+function stripQuote(line: string, col: number, qcol: number): { rest: string; p: number; ambiguous: boolean } {
   const m = line.match(/^( {0,3})>/)!;
   let rest = line.slice(m[0].length);
   let p = col + m[1].length + 1;
@@ -501,7 +507,20 @@ function stripQuote(line: string, col: number, qcol: number): string {
     const lead = rest.match(/^[ \t]*/)![0];
     rest = ' '.repeat(indentCols(rest, p)) + rest.slice(lead.length);
   }
-  return rest;
+  // 起點不同、而結構前綴（清單記號、> 之後）裡還有 tab：欄位換算判不準，交給呼叫端記 error
+  // > 後面是 tab、換算後縮到 4 欄以上又像表格分隔列：網站的引擎會把 tab 整個吃掉照樣排表格，也判不準
+  const tabSep = line.slice(m[0].length).startsWith('\t') && indentCols(rest, p) >= 4 && TABLE_SEP.test(rest.trim()) && rest.includes('|');
+  const ambiguous = tabSep || (p !== qcol && /^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)])(?=[ \t]|$))*[ \t]*/.exec(rest)![0].includes('\t'));
+  return { rest, p, ambiguous };
+}
+
+/** 表格分隔列前面是 tab、換算後剛好縮到 4 欄以上：網站的引擎在引言裡會把 tab 吃掉照樣排表格，排法判不準，記 error。 */
+function tabTableAmbiguous(line: string, next: string | undefined, col: number): boolean {
+  if (next === undefined || line.trim() === '' || next.startsWith(LAZY) || line.startsWith(LAZY)) return false;
+  const lead = next.match(/^[ \t]*/)![0];
+  if (!lead.includes('\t') || indentCols(next, col) < 4) return false;
+  const t = next.trim();
+  return TABLE_SEP.test(t) && t.includes('|') && splitRow(line).length === splitRow(t).length;
 }
 
 interface Fence {
@@ -542,7 +561,8 @@ function listMarker(line: string, col = 0): Marker | null {
   const empty = m[6].trim() === '';
   const base = { ordered, kind: ordered ? m[4] : m[2], start: ordered ? Number(m[3]) : 0, empty };
   if (empty) return { ...base, content: at + 1, first: '' };
-  if (spaces >= 5) return { ...base, content: at + 1, first: ' '.repeat(spaces - 1) + m[6] };
+  // 記號後空 5 欄以上＝內容是縮排程式碼：只拿掉一欄，剩下的空白（含 tab）原樣留給程式碼
+  if (spaces >= 5) return { ...base, content: at + 1, first: stripCols(m[5] + m[6], 1, col + at) };
   return { ...base, content: at + spaces, first: m[6] };
 }
 
@@ -626,9 +646,11 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], co
   const para: string[] = [unlazy(lines[start])];
   let i = start + 1;
   let setext = 0;
+  let tabTable = false;
   while (i < n) {
     const l = lines[i];
     if (l.trim() === '') break;
+    if (tabTableAmbiguous(lines[i - 1], l, col)) tabTable = true;
     if (!l.startsWith(LAZY)) {
       const sx = indentCols(l, col) < 4 ? normLead(l, col).match(SETEXT) : null;
       if (sx) {
@@ -641,6 +663,7 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], co
     para.push(unlazy(l));
     i++;
   }
+  if (tabTable) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '表格分隔列前面用 tab 縮排，網站上的排法判不準；請改用空格或不縮排', where: clip(para[0]) });
   const inline = parseInline(para.join('\n').trim(), ctx);
   if (setext) blocks.push({ t: 'h', level: setext, c: inline });
   // 整段只有一張圖（或一個包著圖的連結）＝圖片區塊
@@ -653,7 +676,11 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], co
 }
 
 /** 把一個容器（整份原稿、引言內層、清單項目）的行切成區塊。open＝最後一個區塊是還開著的段落（給懶惰續行判斷）。 */
-function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; open: boolean } {
+/**
+ * restrictFirst＝第一行是「打斷段落的那一行」開出來的內層（例：段落下一行的「- 2. …」）：
+ * 網站的規則是打斷段落時，不是從 1 開始的有序清單、空的清單項目都不成立，這個限制要一路帶進同一行開的內層容器。
+ */
+function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false): { blocks: Block[]; open: boolean } {
   const blocks: Block[] = [];
   const n = lines.length;
   let open = false;
@@ -661,6 +688,8 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
   let unclosedHtml = false;
   // 上一個區塊是縮排程式碼：網站的引擎在它後面不認「不是從 1 開始的有序清單」，當成段落（照網站做）
   let afterIndentedCode = false;
+  // 上一個段落結束在哪一行（那一行若開了清單或引言＝打斷段落）
+  let paraEnd = -1;
   let i = 0;
   while (i < n) {
     const line = normLead(lines[i], col);
@@ -673,9 +702,11 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
     afterIndentedCode = false;
     if (line.startsWith(LAZY)) {
       i = paragraph(lines, i, ctx, blocks, col);
+      if (blocks[blocks.length - 1]?.t === 'p') paraEnd = i;
       open = i >= n;
       continue;
     }
+    const interrupting = i === paraEnd || (restrictFirst && i === 0);
     // 縮排 4 格以上＝程式碼（段落中間的縮排行不算，那是段落續行）
     if (indentCols(lines[i], col) >= 4) {
       const body: string[] = [];
@@ -773,22 +804,26 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
     }
     if (QUOTE.test(line)) {
       const inner: string[] = [];
-      const qcol = col + line.match(/^ */)![0].length + 2;
+      const qcol = stripQuote(line, col, -1).p;
+      let ambiguous = false;
       while (i < n) {
         const l = normLead(lines[i], col);
         if (QUOTE.test(l)) {
-          inner.push(stripQuote(l, col, qcol));
+          const q = stripQuote(l, col, qcol);
+          if (q.ambiguous) ambiguous = true;
+          inner.push(q.rest);
           i++;
           continue;
         }
-        if (l.trim() !== '' && inner.length > 0 && !lazyBreaks(l, col) && parseBlocks(inner, scratch(), qcol).open) {
+        if (l.trim() !== '' && inner.length > 0 && !lazyBreaks(l, col) && parseBlocks(inner, scratch(), qcol, interrupting).open) {
           inner.push(l.startsWith(LAZY) ? l : LAZY + l);
           i++;
           continue;
         }
         break;
       }
-      const r = parseBlocks(inner, ctx, qcol);
+      if (ambiguous) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '引言裡 > 後面用 tab 縮排（或有的接空格、有的沒有），網站上的排法判不準；請統一寫成「> 」並改用空格', where: clip(line) });
+      const r = parseBlocks(inner, ctx, qcol, interrupting);
       blocks.push({ t: 'quote', c: r.blocks });
       open = r.open && i >= n;
       continue;
@@ -798,7 +833,8 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
       const align = splitRow(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? 'center' : /^-+:$/.test(c) ? 'right' : /^:-+$/.test(c) ? 'left' : null));
       i += 2;
       const rows: Inline[][][] = [];
-      while (i < n && lines[i].trim() !== '' && indentCols(lines[i], col) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1], false, col)) {
+      // 表格不是段落：任何清單項目（不從 1 開始、空項目也算）都會結束表格
+      while (i < n && lines[i].trim() !== '' && indentCols(lines[i], col) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1], false, col) && !listMarker(normLead(lines[i], col), col)) {
         const cells = splitRow(lines[i++]);
         while (cells.length < head.length) cells.push('');
         for (const extra of cells.slice(head.length)) ctx.hidden += marks(extra); // 多出來的格子網站上也不顯示（表格裡再出現像表頭的兩行，也只是一般的列）
@@ -808,7 +844,8 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
       continue;
     }
     const lm = listMarker(line, col);
-    const first = lm && !(prevIndentedCode && lm.ordered && lm.start !== 1) ? lm : null;
+    const restricted = prevIndentedCode || interrupting;
+    const first = lm && !(restricted && ((lm.ordered && lm.start !== 1) || lm.empty)) ? lm : null;
     if (first) {
       const items: Block[][] = [];
       let cur = first;
@@ -833,14 +870,14 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
             i++;
             continue;
           }
-          if (!lazyBreaks(l, col) && parseBlocks(itemLines, scratch(), col + cur.content).open) {
+          if (!lazyBreaks(l, col) && parseBlocks(itemLines, scratch(), col + cur.content, interrupting && items.length === 0).open) {
             itemLines.push(l.startsWith(LAZY) ? l : LAZY + l); // 懶惰續行
             i++;
             continue;
           }
           break;
         }
-        const r = parseBlocks(itemLines, ctx, col + cur.content);
+        const r = parseBlocks(itemLines, ctx, col + cur.content, interrupting && items.length === 0);
         items.push(r.blocks);
         open = r.open && i >= n;
         // 下一個同類的清單記號＝同一張清單的下一項（中間可以有空行）
@@ -860,21 +897,76 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; ope
     }
     // 段落
     i = paragraph(lines, i, ctx, blocks, col);
+    if (blocks[blocks.length - 1]?.t === 'p') paraEnd = i;
     open = i >= n && blocks[blocks.length - 1]?.t !== 'h';
   }
   return { blocks, open: open && !unclosedHtml };
+}
+
+/**
+ * 判不準就擋下的兩類寫法（主站現有文章都沒有，照網站逐一模仿只會越補越多）：
+ * 1. 行首的結構（縮排、> 之後、清單記號之後）用 tab：tab 欄位在網站的引擎裡跟著容器層層換算，排法判不準。程式碼框裡的 tab 不算。
+ * 2. 腳註：網站只顯示「被正文引用到」的定義（放在文末），沒被引用的整段藏起來；信裡定義照段落印出。
+ *    只放行：定義從行首第 0 欄寫起、前一行是空行或另一個定義、標籤不含空白且不重複（不分大小寫）、正文（不含程式碼、註解、網址、定義本身）真的引用到。
+ */
+function checkAmbiguous(body: string, blocks: Block[], ctx: Ctx): void {
+  const fail = (message: string, where: string) => ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message, where: clip(where) });
+  const PREFIX = /^(?:[ \t]*(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*/;
+  const DEF_LINE = /^([ \t>*+\-\d.)]*)\[\^([^\]]*)\]:/;
+  const lines = body.split('\n');
+  const labels: string[] = [];
+  let fence: Fence | null = null;
+  let tabWhere = '';
+  let fnBad = '';
+  lines.forEach((l, i) => {
+    if (fence) {
+      if (fenceCloses(l, fence)) fence = null;
+      return;
+    }
+    // 只認從第 0 欄開始的程式碼框（縮排的 ``` 可能是清單裡的框在收尾，不能當成新框把後面略過）
+    const f = /^[`~]/.test(l) ? fenceOpen(l) : null;
+    if (f) {
+      fence = f;
+      return;
+    }
+    if (!tabWhere && l.trim() !== '' && PREFIX.exec(l)![0].includes('\t')) tabWhere = l;
+    const d = l.match(DEF_LINE);
+    if (!d) return;
+    const prev = i > 0 ? lines[i - 1] : '';
+    if (d[1] !== '' || /\s/.test(d[2]) || (prev.trim() !== '' && !/^\[\^[^\]]*\]:/.test(prev))) {
+      if (!fnBad) fnBad = l;
+    } else labels.push(d[2].toLowerCase());
+  });
+  if (tabWhere) fail('行首的縮排、引言 > 或清單記號後面用了 tab，網站上的排法判不準；請改用空格（程式碼框裡的 tab 不受影響）', tabWhere);
+  if (fnBad) fail('腳註定義要從行首寫起、前面空一行（不能縮排、不能放在引言或清單裡、不能接在段落後面，標籤不能有空白），不然網站上的顯示判不準', fnBad);
+  if (/\\\[\^/.test(body)) fail('原稿有跳脫的腳註引用（\\[^…]），網站上的顯示判不準；請改寫', body.match(/\\\[\^[^\]]*\]?/)![0]);
+  if (!labels.length) return;
+  const texts: string[] = [];
+  const walk = (x: unknown): void => {
+    if (Array.isArray(x)) return x.forEach(walk);
+    if (!x || typeof x !== 'object') return;
+    const o = x as { t?: string; v?: unknown };
+    if (o.t === 'code') return;
+    if (o.t === 'text' && typeof o.v === 'string') texts.push(o.v.toLowerCase());
+    for (const v of Object.values(o)) if (v && typeof v === 'object') walk(v);
+  };
+  for (const b of blocks) {
+    const c0 = b.t === 'p' ? b.c[0] : undefined;
+    if (!(c0?.t === 'text' && /^\[\^[^\]\s]+\]:/.test(c0.v))) walk(b);
+  }
+  const seen = new Set<string>();
+  for (const label of labels) {
+    if (seen.has(label)) fail(`腳註 [^${label}] 定義了兩次，網站只顯示第一個；請刪掉重複的`, `[^${label}]:`);
+    seen.add(label);
+    if (!texts.some((t) => t.split(`[^${label}]`).slice(1).some((after) => !after.startsWith(':')))) fail(`腳註 [^${label}] 有定義但正文沒引用，網站上不顯示；請刪掉或在正文引用它`, `[^${label}]:`);
+  }
 }
 
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const ctx: Ctx = { problems: [], hidden: 0, inCode: 0 };
   const { blocks } = parseBlocks(body.split('\n'), ctx);
-  // 腳註定義（[^名稱]: …）在全文沒被引用時，網站整段不顯示；信裡照段落印出來就會多出網站看不到的字，記 error
-  for (const m of body.matchAll(/^ {0,3}\[\^([^\]\s]+)\]:/gm)) {
-    const ref = `[^${m[1]}]`;
-    const used = body.split(ref).length - 1 > body.split(`${ref}:`).length - 1;
-    if (!used) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: `腳註 ${ref} 有定義但沒被引用，網站上不顯示；請刪掉或在正文引用它`, where: clip(m[0]) });
-  }
+  checkAmbiguous(body, blocks, ctx);
   // 對帳：原文每一個 <!--，不是被當成註解藏起來，就是落在程式碼裡；對不上＝有一個註解符號跑進了正文（或內容不見了），擋下。
   const total = marks(body);
   if (total !== ctx.hidden + ctx.inCode && !ctx.problems.some((p) => p.code === 'unclosed_comment')) {

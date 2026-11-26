@@ -6,6 +6,7 @@
 // 測試本體在 compose-fuzz.test.ts；這裡是產生器與比對。
 import { markdownToHtml } from 'satteri';
 import { compose, createTemplate } from '../src/compose/index.ts';
+import { LBRACE, parseMarkdown, type Block, type Inline } from '../src/compose/markdown.ts';
 
 const template = createTemplate({
   brandName: 'Example Weekly',
@@ -193,6 +194,28 @@ export interface FuzzStats {
 }
 
 /** 一份原稿：跟參照比對三條不變式。errored＝記了 error（寧可擋下，算合格，violations 一定是空的）。 */
+// 程式碼內容逐字比對：參照渲染器的 <code> 內容 vs 解析樹的程式碼節點（只看帶 CODE 記號的，tab、空白都要一樣）
+const unesc = (t: string) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+const refCode = (html: string) => [...html.matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)].map((m) => unesc(m[1]).replace(/\n$/, ''));
+function astCode(bs: Block[], out: string[] = []): string[] {
+  const inl = (ns: Inline[]) => {
+    for (const x of ns) if (x.t === 'code') out.push(x.v);
+    else if ('c' in x && Array.isArray(x.c)) inl(x.c as Inline[]);
+  };
+  for (const b of bs) {
+    if (b.t === 'code') out.push(b.v);
+    else if (b.t === 'p' || b.t === 'h') inl(b.c);
+    else if (b.t === 'quote') astCode(b.c, out);
+    else if (b.t === 'list') for (const it of b.items) astCode(it, out);
+    else if (b.t === 'table') for (const c of [...b.head, ...b.rows.flat()]) inl(c);
+  }
+  return out;
+}
+// 逐行比（網站的引擎偶爾把一段縮排程式碼切成兩個框，內容一樣就算一樣）
+const codeLines = (xs: string[]) => JSON.stringify(xs.join('\n').split('\n').filter((x) => /CODE/.test(x)).sort());
+const sameCode = (body: string, html: string) =>
+  codeLines(refCode(html)) === codeLines(astCode(parseMarkdown(FM + body).blocks).map((x) => x.split(LBRACE).join('{')));
+
 export function checkOne(body: string): { errored: boolean; errors: string[]; violations: { kind: 'I1' | 'I2' | 'I3'; info: string }[] } {
   const ref = markdownToHtml(body).html;
   const where = classify(ref);
@@ -209,6 +232,7 @@ export function checkOne(body: string): { errored: boolean; errors: string[]; vi
     if (shown && !(inH && inT)) violations.push({ kind: 'I2', info: `${tok} 網站上看得到，信裡${inH ? '純文字版' : inT ? 'HTML' : '兩版都'}不見了` });
   }
   for (const m of codeMarks(ref)) if (!c.text.includes(m)) violations.push({ kind: 'I3', info: `程式碼裡的「${m}」沒有原樣保留` });
+  if (!violations.length && !sameCode(body, ref)) violations.push({ kind: 'I3', info: '程式碼內容跟網站不一樣（例如 tab 被換成空白）' });
   return { errored: false, errors, violations };
 }
 
