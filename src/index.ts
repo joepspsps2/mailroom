@@ -16,7 +16,8 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { bodySizeProblem, checkHttpFrom, limitVar, localDay, lookup, parseAddress, pruneRate, purgeLedger, removeSuppression, retentionDays, send, SUPPRESSION_REASONS, takeRate, TIERS, type SuppressionReason, type CoreDeps, type MessageRow, type RouteTable, type SendRequest, type SendResult, type Tier } from './core.ts';
 import { handleCfEvent } from './cf-events.ts';
-import { listMembers, listStatus, listSubscribe, listUnsubscribe, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
+import { listMembers, listStatus, listUnsubscribe, type SubscribeInput, type SubscribeResult, type UnsubscribeInput } from './lists.ts';
+import { subscribeWithWelcome, type WelcomeQueue } from './welcome.ts';
 import { bearer, json, notFound, sameToken } from './http.ts';
 import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
 import { routeExport } from './export.ts';
@@ -27,7 +28,7 @@ import { MAIL_ROUTES, type CloudflareSender, type MailRoute } from './transport.
 import { handleEvent, verifySignature } from './webhook.ts';
 import { handleSesWebhook } from './ses-events.ts';
 import { handleBroadcastRequest, isBroadcastPath } from './broadcast/routes.ts';
-import { broadcastQueue, broadcastTick, isBroadcastBatch, testSendDeps, type BroadcastEnv } from './broadcast/worker.ts';
+import { broadcastDeps, broadcastQueue, broadcastTick, isBroadcastBatch, testSendDeps, type BroadcastEnv } from './broadcast/worker.ts';
 import { handleTrackRequest, resolveTrackSettings, trackHost, trackSecrets } from './track.ts';
 
 export interface Env extends BroadcastEnv {
@@ -185,8 +186,16 @@ export class Mailroom extends WorkerEntrypoint<Env> {
     return drill(this.env, site, input);
   }
   // 電子報名單（內線）：見 docs/lists.md。
-  listSubscribe(input: SubscribeInput) {
-    return listSubscribe(this.env.DB, input);
+  /** 加入名單。第一次加入（firstTime）而且群發總開關開著、這份名單的歡迎信打開時，排一封歡迎信（見 src/welcome.ts）。 */
+  async listSubscribe(input: SubscribeInput): Promise<SubscribeResult> {
+    // 總開關＝群發設得起來（寄件網域、郵差、Queue 都有）；關著就一封都不排。排信失敗不影響加入結果。
+    let switchOn = false;
+    try {
+      switchOn = broadcastDeps(this.env) !== null;
+    } catch {
+      switchOn = false;
+    }
+    return subscribeWithWelcome(this.env.DB, input, { queue: this.env.BROADCAST as unknown as WelcomeQueue | undefined, switchOn });
   }
   listUnsubscribe(input: UnsubscribeInput) {
     return listUnsubscribe(this.env.DB, input);
@@ -299,7 +308,7 @@ export default {
     }
 
     // 名單管理入口（帶管理口令）：見 list-routes.ts。
-    const listResponse = await routeLists(request, env.DB, env.DRILL_TOKEN);
+    const listResponse = await routeLists(request, env.DB, env.DRILL_TOKEN, env.MARKETING_DOMAIN);
     if (listResponse) return listResponse;
 
     // 分析匯出（帶管理口令）：見 export.ts。

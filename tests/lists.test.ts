@@ -31,7 +31,7 @@ test('名單：建立、同 id 再建＝改名；壞 id 與空名稱被擋', asy
 
 test('加入：新加入、已在、大小寫視為同一人；預設分群＝新進觀察群', async () => {
   const db = await setup();
-  assert.deepEqual(await listSubscribe(db, { list: 'weekly', email: 'A@Example.com', source: 'site-card', consentVersion: 'v1' }), { status: 'subscribed' });
+  assert.deepEqual(await listSubscribe(db, { list: 'weekly', email: 'A@Example.com', source: 'site-card', consentVersion: 'v1' }), { status: 'subscribed', firstTime: true });
   assert.deepEqual(await listSubscribe(db, { list: 'weekly', email: ' a@example.com ', source: 'other' }), { status: 'already' });
   assert.equal(count(db, 'contacts'), 1);
   const m = member(db, 'weekly', 'a@example.com')!;
@@ -75,7 +75,7 @@ test('再訂回：讀者本人加入可把退訂改回訂閱，退訂欄位清�
   await listSubscribe(db, { list: 'weekly', email: 'a@example.com', source: 'old' });
   await listUnsubscribe(db, { list: 'weekly', email: 'a@example.com', source: 'one_click' });
   assert.equal(await listStatus(db, { list: 'weekly', email: 'a@example.com' }), 'unsubscribed');
-  assert.deepEqual(await listSubscribe(db, { list: 'weekly', email: 'a@example.com', source: 'new-entry', consentVersion: 'v2' }), { status: 'subscribed' });
+  assert.deepEqual(await listSubscribe(db, { list: 'weekly', email: 'a@example.com', source: 'new-entry', consentVersion: 'v2' }), { status: 'subscribed', firstTime: false });
   const m = member(db, 'weekly', 'a@example.com')!;
   assert.equal(m.status, 'subscribed');
   assert.equal(m.unsubscribed_at, null);

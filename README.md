@@ -140,7 +140,7 @@ If your app can't reach the mailroom at all, queue the message locally and retry
 | `POST /v1/send` | Sending from apps outside your Cloudflare account | per-client `HTTP_KEY_*`; rate limits `HTTP_RATE_PER_MIN` (default 60) and `HTTP_DAILY_LIMIT` (default 2000 per UTC day); sender allowlist `HTTP_FROM` (required per client) |
 | `POST /v1/drill`, `GET /v1/lookup`, `GET /v1/report`, `POST /v1/unsuppress` | Operator tools (see below) | `DRILL_TOKEN`; **if it isn't set these paths return 404**; 20 requests/min and 200/day in total |
 | `GET`/`POST /u/{token}`, `POST /u/{token}/resubscribe` | Unsubscribe page and one-click unsubscribe ([docs/unsubscribe.md](docs/unsubscribe.md)) | the unsubscribe token itself |
-| `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments` | Newsletter list management ([docs/lists.md](docs/lists.md)) | `DRILL_TOKEN`, same quota; bodies capped at 1.5 MB |
+| `PUT /v1/lists/{id}`, `POST /v1/lists/{id}/import`, `POST /v1/lists/{id}/segments`, `PUT`/`GET /v1/lists/{id}/welcome` | Newsletter list management ([docs/lists.md](docs/lists.md)) and the welcome mail ([docs/welcome.md](docs/welcome.md)) | `DRILL_TOKEN`, same quota; bodies capped at 1.5 MB |
 | `GET /c/{token}`, `GET /o/{token}.gif` on the `TRACK_BASE_URL` host | Click redirect and open pixel ([docs/tracking.md](docs/tracking.md)) | the signed token itself |
 | `/v1/campaigns/*`, `/v1/throttle`, `/v1/warmup/*`, `/v1/broadcast/release-hold` | Newsletter broadcasting ([docs/broadcast.md](docs/broadcast.md)); 404 unless `MARKETING_DOMAIN` is set; test mail only if `TEST_RECIPIENTS` is set | `DRILL_TOKEN`, same quota; bodies capped at 3 MB |
 

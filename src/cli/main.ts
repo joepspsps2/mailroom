@@ -47,7 +47,7 @@ export interface CliIo {
 export interface RunOptions { defaults?: CliDefaults; env?: Record<string, string | undefined>; io?: Partial<CliIo> }
 
 const VALUES = ['issue', 'source', 'post', 'web-url', 'list', 'from', 'subject', 'audience', 'source-ref', 'to', 'note', 'reason', 'at', 'out', 'contact', 'as', 'tz', 'base-url'];
-const BOOLEANS = ['yes', 'json', 'offline', 'force', 'release-domain', 'to-defaults', 'help'];
+const BOOLEANS = ['yes', 'json', 'offline', 'force', 'release-domain', 'to-defaults', 'help', 'enable', 'disable'];
 
 class CliError extends Error {
   readonly code: number;
@@ -76,6 +76,9 @@ Changes state (dry-run unless --yes is given):
   cancel <id> --reason "..." --yes
   retry-failed <id> --yes     resolve <id> --contact N --as sent|failed --note "..." --yes
   hold release --note "..." --yes        release the sender-domain hold
+  welcome [--list L]                     show the list's welcome mail (subject, on/off)
+  welcome --source <file.md> --web-url U (--enable | --disable) [--list L] [--subject S] --yes
+                                         compose, check and store the welcome mail for new subscribers
 Options: --json (machine-readable output), --base-url, --tz +08:00
 Environment: MAILROOM_URL, MAILROOM_ADMIN_TOKEN`;
 
@@ -225,6 +228,7 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
         return r.ok ? 0 : 1;
       }
       case 'create': return await create();
+      case 'welcome': return await welcome();
       case 'preview': {
         const id = idArg();
         if (!yes) {
@@ -400,6 +404,51 @@ export async function runCli(argv: readonly string[], opts: RunOptions = {}): Pr
       const rec = await call('POST', `/v1/campaigns/${issue}/preflight`, { ok: check.ok, issues: check.issues.map((i) => ({ severity: i.severity, code: i.code, message: i.message })) });
       emit([...lines, '', `saved as draft (${saved.changed ? 'new or changed' : 'unchanged'}); check recorded: ${rec.preflightOk ? 'passed' : 'failed'}`, rec.preflightOk ? `Next: campaign preview ${issue} --yes` : 'Next: fix the errors above in the source, then run create again (same id updates the draft).'], { ...data, saved, preflightOk: rec.preflightOk });
       return rec.preflightOk ? 0 : 1;
+    }
+
+    async function welcome(): Promise<number> {
+      const list = (typeof flags.list === 'string' ? flags.list : d.list) ?? '';
+      if (!ID.test(list)) throw new CliError('welcome needs a list: pass --list or set it in the defaults.', 2);
+      if (typeof flags.source !== 'string') {
+        const r = await api('GET', `/v1/lists/${list}/welcome`);
+        if (r.status === 404 && r.body.reason === 'not_found') {
+          emit([`${list}: no welcome mail stored (new subscribers get none).`, 'Next: welcome --source <file.md> --web-url https://... --disable --yes (store it switched off first, look at it, then --enable).'], { list, exists: false });
+          return 0;
+        }
+        if (r.status >= 400 || r.body.ok === false) throw new CliError(friendly(String(r.body.reason ?? `http_${r.status}`)));
+        emit([`${list}: "${r.body.subject}" from ${r.body.from}`, `welcome mail is ${r.body.enabled ? 'ON (sent to first-time subscribers while newsletters are enabled)' : 'OFF'}; updated ${r.body.updatedAt}`], { list, exists: true, subject: r.body.subject, enabled: r.body.enabled, updatedAt: r.body.updatedAt });
+        return 0;
+      }
+      if (flags.enable === true && flags.disable === true) throw new CliError('Pick one: --enable or --disable.', 2);
+      if (!d.template) throw new CliError('No email template is configured.\nNext: pass `template` in the defaults (see docs/composing.md).');
+      const from = (typeof flags.from === 'string' ? flags.from : d.from) ?? '';
+      if (!from) throw new CliError('The sender is required: pass --from or set it in the defaults.', 2);
+      let source: string;
+      try {
+        source = await io.readFile(flags.source);
+      } catch {
+        throw new CliError(`Could not read the source file "${flags.source}".\nNext: check the path.`);
+      }
+      const webUrl = typeof flags['web-url'] === 'string' ? flags['web-url'] : '';
+      if (!webUrl) throw new CliError('Pass --web-url https://... (the {{web_url}} link, for example the newsletter archive).', 2);
+      const template = createTemplate(d.template);
+      // 歡迎信不追蹤：不給 trackBase（歡迎信沒有期別的連結表）。
+      const { trackBase: _ignored, ...composeOpts } = d.composeDefaults ?? {};
+      const composed = compose({ ...composeOpts, source, template, issue: 'welcome', ...(typeof flags.subject === 'string' ? { subject: flags.subject } : {}) });
+      const check: PreflightResult = await preflight(composed, { template, webUrl, checkLinks: flags.offline !== true, fetch: io.fetch });
+      const errors = check.issues.filter((i) => i.severity === 'error');
+      const lines = [
+        `welcome mail for ${list}: "${composed.subject}"`, `from ${from}   {{web_url}} ${webUrl}`, `HTML ${composed.htmlBytes} bytes, ${composed.links.length} links (not tracked)`,
+        `pre-send check: ${check.ok ? 'PASSED' : `FAILED (${errors.length} error${errors.length === 1 ? '' : 's'})`}`,
+        ...check.issues.map((i) => `  [${i.severity}] ${i.code}: ${i.message}${i.where ? ` (${i.where})` : ''}`),
+      ];
+      const data = { list, subject: composed.subject, checkOk: check.ok, issues: check.issues };
+      if (!yes) return dry(lines, data);
+      if (!check.ok) throw new CliError(`${lines.join('\n')}\n\nNot stored: fix the errors above first.`, 1);
+      if (flags.enable !== true && flags.disable !== true) throw new CliError('Say whether new subscribers should get it now: --enable or --disable.', 2);
+      const saved = await call('PUT', `/v1/lists/${list}/welcome`, { subject: composed.subject, from, ...(d.replyTo ? { replyTo: d.replyTo } : {}), html: composed.html, text: composed.text, webUrl, enabled: flags.enable === true });
+      emit([...lines, '', `stored (${saved.changed ? 'new or changed' : 'unchanged'}); welcome mail is ${saved.enabled ? 'ON' : 'OFF'}.`, saved.enabled ? 'It is sent only while newsletters are enabled on this deployment, and only to first-time subscribers.' : 'Next: look at it, then run again with --enable --yes.'], { ...data, saved });
+      return 0;
     }
 
     function previewLines(id: string, p: Record<string, any>, marked: boolean): string[] {

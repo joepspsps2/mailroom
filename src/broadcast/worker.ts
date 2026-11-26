@@ -170,6 +170,7 @@ export function broadcastDeps(env: BroadcastEnv, wiring: BroadcastWiring = {}): 
     config,
     render: wiring.render ?? personalizeRender(unsubLinksFromEnv(env), trackFromEnv(env)),
     feedback: wiring.feedback,
+    unsub: { secrets: unsubSecrets(env.UNSUB_TOKEN_SECRET, env.UNSUB_TOKEN_SECRET_PREVIOUS), baseUrl: env.UNSUB_BASE_URL, mailto: env.UNSUB_MAILTO },
     alert: wiring.alert ?? ((a) => (a.level === 'info' ? console.log : console.warn)('broadcast', a.level, a.code, a.campaign ?? '-', a.message)),
   };
 }
