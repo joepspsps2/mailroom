@@ -80,8 +80,11 @@ Every `error` blocks scheduling. `warn` and `info` are recorded only.
 | `preheader_missing` | no preview text |
 | `unknown_placeholder`, `unbalanced_section` | any `{{…}}` that is not on the list above, or an unmatched `{{#name}}` |
 | `link_broken`, `image_broken` | HTTP 404 or 410 (only these two) |
-| `link_invalid`, `link_private_host` | a malformed URL, or one pointing at localhost / a private address |
+| `link_invalid`, `link_private_host` | a malformed URL, or one pointing at localhost / a private or reserved address (IPv4, IPv6, IPv4-mapped IPv6, 100.64/10…) |
+| `link_redirect_private`, `link_redirect_bad` | a redirect leads to a private address, a non-http(s) URL, or loops past 5 hops |
 | `unsupported_html`, `unsupported_syntax`, `unsafe_link`, `link_not_absolute`, `image_not_absolute`, `issue_invalid`, `track_base_invalid` | reported by `compose()` itself |
+
+Redirects are followed by hand, one hop at a time, and every hop goes through the private-address check again. The check looks at the host as written; it does not resolve DNS, so run `preflight` from a network that cannot reach your internal services if the content is not written by you.
 
 Timeouts, network errors and other status codes (403, 429, 5xx…) are recorded as `warn` (`link_unverified`,
 `link_status`) and do not block. Pass your own `fetch` to test, or `checkLinks: false` to run offline.

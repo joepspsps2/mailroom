@@ -15,7 +15,7 @@ export interface PreflightOptions {
   /** 要不要實際打網路檢查連結與圖片（預設要）。給 false＝只做離線檢查，並記一條 warn。 */
   checkLinks?: boolean;
   /** 可注入的 fetch（測試用假的）。 */
-  fetch?: (url: string, init?: { method?: string; signal?: AbortSignal; redirect?: 'follow' }) => Promise<{ status: number }>;
+  fetch?: (url: string, init?: { method?: string; signal?: AbortSignal; redirect?: 'manual' }) => Promise<{ status: number; headers?: { get(name: string): string | null } }>;
   timeoutMs?: number;
   concurrency?: number;
 }
@@ -37,14 +37,30 @@ function cp(s: string): number {
   return Array.from(s).length;
 }
 
-function privateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return h.includes(':');
-  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return false;
-  const [a, b] = [Number(m[1]), Number(m[2])];
-  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+function v4Blocked(a: number, b: number, c: number): boolean {
+  return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0 && c === 0) || (a === 198 && (b === 18 || b === 19));
+}
+
+/** 內網、本機、保留位址（只看網址裡的主機寫法；URL 解析器已把十進位／十六進位的 IPv4 寫法統一成點分格式）。 */
+export function privateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (h === '' || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan') || h.endsWith('.home.arpa')) return true;
+  const m4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m4) return v4Blocked(Number(m4[1]), Number(m4[2]), Number(m4[3]));
+  if (h.includes(':')) {
+    if (h === '::' || h === '::1') return true;
+    if (/^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith('64:ff9b:')) return true;
+    // IPv4 對映／相容寫法（::ffff:7f00:1、::7f00:1、::ffff:127.0.0.1）：取出內嵌的 IPv4 再判斷
+    const tail = h.match(/^(?:0{0,4}:){1,6}(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/) ?? null;
+    if (tail) {
+      const hi = parseInt(tail[1], 16);
+      const lo = parseInt(tail[2], 16);
+      return v4Blocked(hi >> 8, hi & 255, lo >> 8);
+    }
+    const dotted = h.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (dotted) return v4Blocked(Number(dotted[1]), Number(dotted[2]), Number(dotted[3]));
+  }
+  return false;
 }
 
 export async function preflight(c: ComposeResult, opts: PreflightOptions): Promise<PreflightResult> {
@@ -141,9 +157,13 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
           add('link_private_host', 'error', '連結指向內網或本機位址', url.slice(0, 80));
           continue;
         }
-        const status = await probe(f, url, timeout);
+        const { status, blocked } = await probe(f, url, timeout);
         linkStatuses.push({ url, status, kind });
         const what = kind === 'image' ? '圖片' : kind === 'web' ? '網頁版' : '連結';
+        if (blocked) {
+          add(blocked === 'private' ? 'link_redirect_private' : 'link_redirect_bad', 'error', blocked === 'private' ? `${what}轉址到內網或本機位址` : `${what}轉址次數過多或轉址目標不合法`, url.slice(0, 120));
+          continue;
+        }
         if (status === 404 || status === 410) add(kind === 'image' ? 'image_broken' : 'link_broken', 'error', `${what}打不開（HTTP ${status}）`, url.slice(0, 120));
         else if (status === 0) add('link_unverified', 'warn', `${what}連不上或逾時，無法確認`, url.slice(0, 120));
         else if (status >= 400) add('link_status', 'warn', `${what}回 HTTP ${status}（不算壞連結，照實記）`, url.slice(0, 120));
@@ -156,20 +176,40 @@ export async function preflight(c: ComposeResult, opts: PreflightOptions): Promi
   return { ok: !issues.some((i) => i.severity === 'error'), issues, linkStatuses };
 }
 
-/** 先 HEAD；伺服器不支援 HEAD（405／501）再 GET。回狀態碼；連不上或逾時回 0。 */
-async function probe(f: NonNullable<PreflightOptions['fetch']>, url: string, timeoutMs: number): Promise<number> {
-  const once = async (method: 'HEAD' | 'GET'): Promise<number> => {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), timeoutMs);
-    try {
-      return (await f(url, { method, signal: ctl.signal, redirect: 'follow' })).status;
-    } catch {
-      return 0;
-    } finally {
-      clearTimeout(timer);
+const MAX_HOPS = 5;
+type ProbeResult = { status: number; blocked?: 'private' | 'too_many_redirects' | 'bad_redirect' };
+
+/** 先 HEAD；伺服器不支援 HEAD（405／501）再 GET。轉址自己一跳一跳跟，每一跳都重做內網檢查。連不上或逾時回 status 0。 */
+async function probe(f: NonNullable<PreflightOptions['fetch']>, url: string, timeoutMs: number): Promise<ProbeResult> {
+  const once = async (method: 'HEAD' | 'GET'): Promise<ProbeResult> => {
+    let cur = url;
+    for (let hop = 0; hop <= MAX_HOPS; hop++) {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), timeoutMs);
+      let res: { status: number; headers?: { get(name: string): string | null } };
+      try {
+        res = await f(cur, { method, signal: ctl.signal, redirect: 'manual' });
+      } catch {
+        return { status: 0 };
+      } finally {
+        clearTimeout(timer);
+      }
+      const loc = res.status >= 300 && res.status < 400 ? res.headers?.get('location') : null;
+      if (!loc) return { status: res.status };
+      if (hop === MAX_HOPS) return { status: res.status, blocked: 'too_many_redirects' };
+      let next: URL;
+      try {
+        next = new URL(loc, cur);
+      } catch {
+        return { status: res.status, blocked: 'bad_redirect' };
+      }
+      if (!/^https?:$/.test(next.protocol)) return { status: res.status, blocked: 'bad_redirect' };
+      if (privateHost(next.hostname)) return { status: res.status, blocked: 'private' };
+      cur = next.toString();
     }
+    return { status: 0 };
   };
-  const s = await once('HEAD');
-  if (s === 405 || s === 501) return once('GET');
-  return s;
+  const r = await once('HEAD');
+  if (r.status === 405 || r.status === 501) return once('GET');
+  return r;
 }
