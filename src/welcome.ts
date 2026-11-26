@@ -152,6 +152,16 @@ function fmt(a: { name: string | null; addr: string }): string {
   return a.name ? `${a.name} <${a.addr}>` : a.addr;
 }
 
+/**
+ * 名字是加入的人自己填的；歡迎信是加入一發生就寄出的自動信，名字欄可以被拿來夾帶網址或網域（「請到 evil.example 領獎」）。
+ * 名字裡有網址、網域、@、斜線或角括號的樣子，就當作沒有名字（整段問候拿掉）。
+ */
+export function safeName(name: string | null): string | null {
+  if (typeof name !== 'string') return null;
+  if (/[\/:@<>]|www|\.[a-z0-9-]{2,}/i.test(name)) return null;
+  return name;
+}
+
 export async function consumeWelcome(deps: WelcomeDeps, msg: WelcomeMessage): Promise<WelcomeResult> {
   const { db } = deps;
   const now = (deps.now ?? (() => new Date()))();
@@ -188,7 +198,7 @@ export async function consumeWelcome(deps: WelcomeDeps, msg: WelcomeMessage): Pr
     const links = await unsubscribeLinks(deps.unsub.secrets, { baseUrl: deps.unsub.baseUrl, mailtoAddress: deps.unsub.mailto }, { list: msg.list, contactId: msg.contact, campaign: null });
     content = personalize(
       { html: w.html, text: w.text, headers: { ...links.headers } },
-      { name: member.name, email: member.email, web_url: w.web_url, unsubscribe_url: links.url },
+      { name: safeName(member.name), email: member.email, web_url: w.web_url, unsubscribe_url: links.url },
     );
   } catch (e) {
     console.error('welcome render failed', e instanceof Error ? e.message.slice(0, 200) : 'unknown');

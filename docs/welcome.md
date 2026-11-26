@@ -24,6 +24,10 @@ All of these must hold:
 `listSubscribe` answers as before, with one extra field: `{ status: 'subscribed', firstTime: boolean }`. Queueing happens after
 the member is written; if it fails it is logged and the subscribe still succeeds.
 
+Only call `listSubscribe` for addresses whose owner confirmed the subscription (for example after a confirmation mail): the
+welcome mail goes out automatically. Because the name is supplied by whoever subscribes, a name that looks like it carries a
+link (`/`, `:`, `@`, `<`, `>`, `www`, or a dot followed by letters) is dropped from the welcome mail (the greeting section is left out).
+
 A welcome mail is not tracked (no click redirect, no open pixel). Events for it carry `campaign = "_welcome-{list}"`, which can
 never collide with an issue id. Bounces and complaints are handled like any other newsletter mail.
 

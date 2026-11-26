@@ -240,3 +240,13 @@ test('desk command: welcome dry run, refuses without --enable/--disable, stores,
   const shown = await run(['welcome']);
   assert.match(shown.out, /welcome mail is ON/);
 });
+
+test('a name that carries a link or domain is dropped from the welcome mail', async () => {
+  const { safeName } = await import('../src/welcome.ts');
+  for (const bad of ['Win at evil.example', 'http://x', 'a@b', 'www x', '<b>hi</b>', 'see example.com/prize']) assert.equal(safeName(bad), null, bad);
+  for (const ok of ['Ada', '林小明', 'Mary Jane', 'J. R.']) assert.equal(safeName(ok), ok, ok);
+  const w = await world();
+  await w.subscribe('n@example.com', 'Claim at evil.example');
+  await w.settle();
+  assert.doesNotMatch(w.welcomes()[0].html + w.welcomes()[0].text, /evil/);
+});
