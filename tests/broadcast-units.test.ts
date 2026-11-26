@@ -40,27 +40,27 @@ test('假郵差：照模擬信箱地址決定結果、rules 可指定次數、�
   const events: ProviderEvent[] = [];
   const p = new FakePostman({ emit: (e) => void events.push(e), rules: [{ match: 'flaky', outcome: 'temporary', times: 1 }, { match: /@slow\./, outcome: 'delay' }] });
   const mail = (to: string) => ({ from: 'a@mail.example.com', to, subject: 's', html: 'h', text: 't', tags: { campaign: 'c', contact: '1' }, idempotencyKey: 'k' });
-  assert.equal((await p.send(mail('success@simulator.example'))).ok, true);
-  await p.send(mail('bounce@simulator.example'));
-  await p.send(mail('complaint+7@simulator.example'));
-  await p.send(mail('suppressionlist@simulator.example'));
-  await p.send(mail('x@slow.example'));
+  assert.equal((await p.send(mail('success@example.com'))).ok, true);
+  await p.send(mail('bounce@example.com'));
+  await p.send(mail('complaint+7@example.com'));
+  await p.send(mail('suppressionlist@example.com'));
+  await p.send(mail('x@slow.example.com'));
   assert.deepEqual(await p.send(mail('flaky@example.com')), { ok: false, kind: 'temporary', error: 'fake temporary failure' });
   assert.equal((await p.send(mail('flaky@example.com'))).ok, true, 'times:1 only once');
   const types = events.map((e) => `${e.email}:${e.type}${e.subtype ? `:${e.subtype}` : ''}`);
   assert.deepEqual(types, [
-    'success@simulator.example:send', 'success@simulator.example:delivery',
-    'bounce@simulator.example:send', 'bounce@simulator.example:bounce:Permanent',
-    'complaint+7@simulator.example:send', 'complaint+7@simulator.example:delivery', 'complaint+7@simulator.example:complaint',
-    'suppressionlist@simulator.example:send', 'suppressionlist@simulator.example:bounce:Permanent',
-    'x@slow.example:send', 'x@slow.example:delay', 'x@slow.example:delivery',
+    'success@example.com:send', 'success@example.com:delivery',
+    'bounce@example.com:send', 'bounce@example.com:bounce:Permanent',
+    'complaint+7@example.com:send', 'complaint+7@example.com:delivery', 'complaint+7@example.com:complaint',
+    'suppressionlist@example.com:send', 'suppressionlist@example.com:bounce:Permanent',
+    'x@slow.example.com:send', 'x@slow.example.com:delay', 'x@slow.example.com:delivery',
     'flaky@example.com:send', 'flaky@example.com:delivery',
   ]);
   assert.equal(new Set(events.map((e) => e.providerEventId)).size, events.length);
   const p2 = new FakePostman({ rules: [{ match: 'a', outcome: 'throttle' }, { match: 'b', outcome: 'account_paused' }, { match: 'c', outcome: 'crash' }] });
-  assert.equal((await p2.send(mail('a@x.example'))).ok, false);
-  assert.deepEqual(await p2.send(mail('b@x.example')), { ok: false, kind: 'account_paused', error: 'fake account paused' });
-  await assert.rejects(p2.send(mail('c@x.example')));
+  assert.equal((await p2.send(mail('a@example.com'))).ok, false);
+  assert.deepEqual(await p2.send(mail('b@example.com')), { ok: false, kind: 'account_paused', error: 'fake account paused' });
+  await assert.rejects(p2.send(mail('c@example.com')));
   assert.equal(p2.accepted.length, 0);
   assert.deepEqual(await new FakePostman({ limits: { perSecond: 1, perDay: 200 } }).limits(), { perSecond: 1, perDay: 200, enforcement: 'HEALTHY', sentLast24h: undefined });
 });
