@@ -44,7 +44,7 @@ function classify(html: string): Map<string, Where[]> {
       }
       continue;
     }
-    if (html[i] === '<') {
+    if (html[i] === '<' && /[A-Za-z/!?]/.test(html[i + 1] ?? '')) {
       // 標籤結尾的 >：屬性值引號裡的 > 不算（替代文字裡可能有 </em> 之類）
       let end = -1;
       for (let k = i + 1, q = ''; k < html.length; k++) {
@@ -66,7 +66,7 @@ function classify(html: string): Map<string, Where[]> {
       i = end + 1;
       continue;
     }
-    const next = html.indexOf('<', i);
+    const next = html.indexOf('<', html[i] === '<' ? i + 1 : i); // 不是標籤的 < 當一般字
     const seg = next < 0 ? html.slice(i) : html.slice(i, next);
     for (const m of seg.matchAll(TOKEN)) (out.get(m[0]) ?? out.set(m[0], []).get(m[0])!).push(code ? 'code' : 'text');
     i = next < 0 ? html.length : next;

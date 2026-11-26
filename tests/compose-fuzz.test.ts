@@ -26,7 +26,7 @@ test(`隨機探測：${N} 份（種子 ${SEED}），三條不變式零違反`, (
 });
 
 // ───────── 五輪覆核留下的每一個反例＋本輪探測找到的寫法：固定下來，跟參照渲染器比對 ─────────
-// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的；「複審」＝修完後第二次審查找到的；「三審」「四審」＝第三、四次審查找到的。
+// r1～r5＝第一到第五輪覆核的反例（改寫成 BODY／CMT／CODE 記號，方便自動比對）；「本輪」＝這次改寫時隨機探測或推敲出來的；「審查」＝合併前對抗審查找到的；「複審」＝修完後第二次審查找到的；「三審」「四審」「五審」＝第三到五次審查找到的。
 // 名稱、原稿（只有正文）、預期：null＝正確處理（不記 error），字串＝必須記這個 error 擋下
 // 行首結構用 tab 的寫法（引言 > 後、清單記號後、清單續行）一律擋下：主站沒有這種文章，網站的 tab 換算判不準
 const REVIEW_CASES: [string, string, string | null][] = [
@@ -150,6 +150,16 @@ const REVIEW_CASES: [string, string, string | null][] = [
   ['四審 腳註定義後直接接表格', '[^a]: CMT1X\n| BODY2X[^a] | b |\n|---|---|', 'unsupported_syntax'],
   ['四審 腳註後空行再接縮 3 格的行', 'BODY0X[^1]\n\n[^1]: BODY1X\n\n   `CODE2X <!-- CODE3X -->`', 'unsupported_syntax'],
   ['四審 腳註內容又是定義', 'BODY0X[^A]\n\n[^A]: [^1]: CMT1X', 'unsupported_syntax'],
+  ['五審 連結後緊接腳註引用', 'BODY0X[來源 BODY1X](https://example.com)[^2]\n\n[^2]: BODY2X', null],
+  ['五審 圖片與角括號網址後緊接腳註引用', 'BODY0X ![圖](https://example.com/a.png)[^2] <https://example.com>[^3]\n\n[^2]: BODY1X\n\n[^3]: BODY2X', null],
+  ['五審 括號裡 www 網址吃掉腳註引用', 'see (www.example.com)[^1] BODY1X\n\n[^1]: CMT2X', 'unsupported_syntax'],
+  ['五審 標籤大小寫折疊 ß＝ss', 'BODY1X [^ss] [^ß]\n\n[^ss]: BODY2X\n\n[^ß]: CMT3X', 'unsupported_syntax'],
+  ['五審 腳註內容以 HTML 開頭', 'BODY1X [^a]\n\n[^a]: <!-- --> `<!-- CMT2X -->` BODY3X', 'unsupported_syntax'],
+  ['五審 網址後緊接反引號', 'BODY0X https://example.com` <!-- CMT1X --> ` BODY2X', 'unsupported_syntax'],
+  ['五審 註解區塊後沒收尾的標籤', '<!-- CMT1X --> <x CMT2X\n\nBODY3X', 'unsupported_html'],
+  ['五審 強調裡的網址吃掉腳註引用', '*www.example.com/p*[^a] BODY1X\n\n[^a]: CMT2X', 'unsupported_syntax'],
+  ['五審 email 後緊接腳註引用', 'a@example.com_[^a] BODY1X\n\n[^a]: CMT2X', 'unsupported_syntax'],
+  ['五審 行內程式碼不跨兩則腳註定義', 'BODY0X[^a] BODY1X[^b]\n\n[^a]: `BODY2X\n[^b]: `CODE3X`', null],
   ['複審 縮排碼後不從 1 開始的有序清單', '\t<!--CODE1X-->\n2)     <!--CMT2X--> BODY3X', 'unsupported_syntax'],
 ];
 

@@ -107,8 +107,10 @@ interface Ctx {
   refs: Set<string>;
   inDef: boolean;
   inLink: number;
+  /** 最近一段合格腳註定義結束在哪一行（只在最外層用）：之後空行＋縮排的行＝網站上可能屬於腳註的續段，判不準。 */
+  lastDefEnd: number;
 }
-const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0 });
+const newCtx = (): Ctx => ({ problems: [], hidden: 0, inCode: 0, tab: '', defs: [], refs: new Set(), inDef: false, inLink: 0, lastDefEnd: -1 });
 const scratch = newCtx;
 /** 行首空白裡有 tab。 */
 const tabLead = (l: string) => /^[ \t]*\t/.test(l.startsWith(LAZY) ? l.slice(1) : l);
@@ -271,6 +273,11 @@ function autolink(text: string): Inline[] {
   return out.map((n) => (n.t === 'text' ? { t: 'text', v: decodeEntities(n.v) } : n));
 }
 
+/** 網站會自動連結的網址（http、https、www.、email）出現在一串不含空白的字裡。 */
+const URL_TAIL = /(?:https?:\/\/|www\.|[\w.+-]+@[\w-]+\.)/i;
+/** 腳註標籤比對：不分大小寫，照 Unicode 的大小寫折疊（ß＝ss、ς＝σ）。 */
+const fnLabel = (l: string) => l.toLowerCase().toUpperCase().toLowerCase();
+
 function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
   const out: Inline[] = [];
   let buf = '';
@@ -297,6 +304,8 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
       continue;
     }
     if (ch === '`') {
+      // 網址後面緊接反引號：網站會把反引號收進自動連結，程式碼的切法就跟信裡不同，判不準
+      if (URL_TAIL.test(buf.match(/\S*$/)![0])) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '網址後面緊接反引號，網站會把反引號當成網址的一部分；請在網址和反引號之間加空格', where: clip(buf.match(/\S*$/)![0] + s.slice(i, i + 20)) });
       const span = codeSpanAt(s, i);
       if (span) {
         flush();
@@ -353,10 +362,12 @@ function parseInline(s: string, ctx: Ctx, depth = 0): Inline[] {
     // 腳註引用 [^名稱]：記下來（判斷定義有沒有被引用）；字面照留。連結文字裡的引用網站不做連結，判不準，記 error
     if (ch === '[') {
       const fn = s.slice(i).match(/^\[\^([^\]\s\\]+)\]/);
-      // 接在網址後面（https://…[^1]）的不算：網站會把整串變成自動連結
-      const inUrl = /(?::\/\/|^www\.)/i.test(s.slice(0, i).match(/\S*$/)![0]);
+      // 接在網址後面（https://…[^1]、(www.…)[^1]）的不算：網站會把整串變成自動連結（只看還沒處理的字，連結的 ](網址) 不算）
+      // 原稿這一串（例：*www.e.com*[^1]）裡有網址、又不是 [文字](網址) 或 <網址> 收好的，也不算
+      const srcTail = s.slice(0, i).match(/\S*$/)![0];
+      const inUrl = URL_TAIL.test(buf.match(/\S*$/)![0]) || (URL_TAIL.test(srcTail) && !srcTail.includes('](') && !srcTail.endsWith('>'));
       if (fn && !inUrl && s[i + fn[0].length] !== '(' && s[i + fn[0].length] !== ':') {
-        if (!ctx.inDef) ctx.refs.add(fn[1].toLowerCase());
+        if (!ctx.inDef) ctx.refs.add(fnLabel(fn[1]));
         if (ctx.inLink) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '連結文字裡有腳註引用，網站上不會做成連結；請把腳註移到連結外面', where: clip(fn[0]) });
       }
     }
@@ -675,7 +686,7 @@ function rawTail(rest: string, ctx: Ctx): Block | null {
     pos = e;
   }
   if (PSEUDO_COMMENT.test(out)) ctx.problems.push({ code: 'unsupported_html', severity: 'error', ...tagProblem(out.match(PSEUDO_COMMENT)![0], false) });
-  const tag = out.match(/<\/?[a-zA-Z][^>]*>/);
+  const tag = out.match(/<\/?[a-zA-Z][^>]*>/) ?? out.match(/<[A-Za-z/!?][^\s>]*/); // 沒收尾的 <字母 也算：瀏覽器會把後面整段吞成標籤
   if (tag) ctx.problems.push({ code: 'unsupported_html', severity: 'error', ...tagProblem(tag[0], false) });
   const v = decodeEntities(out.trim());
   return v ? { t: 'p', c: [{ t: 'text', v }] } : null;
@@ -684,9 +695,7 @@ function rawTail(rest: string, ctx: Ctx): Block | null {
 /** 腳註定義（合格的單行寫法、任何寫法、內容是區塊寫法）。 */
 const FN_DEF = /^\[\^([^\]\s\\]+)\]:/;
 const FN_DEF_ANY = /^ {0,3}\[\^[^\]]*\]:/;
-const FN_DEF_BLOCK = /^(?:\s{4,}\S|\s*\[[^\]]*\]:|\s*(?:>|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|`{3,}|~{3,}|#{1,6}(?:\s|$)|\|))/;
-/** 最近一段合格腳註定義結束在哪一行（只在最外層用）：之後空行＋縮 4 欄的行＝網站上屬於腳註的續段，判不準。 */
-let lastDefEnd = -1;
+const FN_DEF_BLOCK = /^(?:\s{4,}\S|\s*<|\s*\[[^\]]*\]:|\s*(?:>|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|`{3,}|~{3,}|#{1,6}(?:\s|$)|\|))/;
 
 /** 段落：從 lines[start] 收到空行或能打斷段落的行為止；下一行是 === 或 --- ＝標題（setext）。回傳下一個要看的行。 */
 function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], col: number): number {
@@ -724,13 +733,14 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], co
     // 後面要接空行或文末：被別的區塊（表格、清單…）打斷時，網站會把那個區塊也收進腳註
     if (col === 0 && !setext && (i >= n || lines[i].trim() === '') && raw.every((l) => !l.startsWith(LAZY) && isDef(l))) {
       def = true;
-      for (const l of raw) ctx.defs.push(l.match(FN_DEF)![1].toLowerCase());
+      for (const l of raw) ctx.defs.push(fnLabel(l.match(FN_DEF)![1]));
     } else ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '腳註定義要從行首寫起、前面空一行、一則一行（不能縮排、不能放在引言或清單裡、不能接在段落後面或變成標題，內容不能是清單、引言、程式碼）；不然網站上的顯示判不準', where: clip(para.find((l) => FN_DEF_ANY.test(l))!) });
   }
   ctx.inDef = def;
-  const inline = parseInline(para.join('\n').trim(), ctx);
+  // 連續的腳註定義在網站上是各自獨立的一則：一行一行分開轉（行內程式碼不能跨到下一則）
+  const inline: Inline[] = def ? para.flatMap((l, k) => [...(k ? [{ t: 'br' } as Inline] : []), ...parseInline(l.trim(), ctx)]) : parseInline(para.join('\n').trim(), ctx);
   ctx.inDef = false;
-  if (def) lastDefEnd = i;
+  if (def) ctx.lastDefEnd = i;
   if (setext) blocks.push({ t: 'h', level: setext, c: inline });
   // 整段只有一張圖（或一個包著圖的連結）＝圖片區塊
   else if (inline.length === 1 && inline[0].t === 'image') blocks.push({ t: 'image', src: inline[0].src, alt: inline[0].alt });
@@ -769,7 +779,7 @@ function parseBlocks(lines: string[], ctx: Ctx, col = 0, restrictFirst = false):
     // 行首結構用 tab：縮排程式碼只看拿掉的那 4 欄，其他行看整段行首空白
     if (indentCols(lines[i], col) >= 4 ? consumedHasTab(lines[i], 4, col) : tabLead(lines[i])) noteTab(ctx, lines[i]);
     // 腳註定義後面空行、再接縮 4 欄的行：網站上那是腳註的續段（多段腳註），判不準
-    if (col === 0 && lastDefEnd >= 0 && i > lastDefEnd && lines.slice(lastDefEnd, i).every((l) => l.trim() === '') && indentCols(lines[i]) >= 1) {
+    if (col === 0 && ctx.lastDefEnd >= 0 && i > ctx.lastDefEnd && lines.slice(ctx.lastDefEnd, i).every((l) => l.trim() === '') && indentCols(lines[i]) >= 1) {
       ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: '腳註定義後面接了縮排的行（可能是多段腳註），網站上的顯示判不準；請把腳註寫成一則一行、後面的段落不要縮排', where: clip(lines[i]) });
     }
     if (line.startsWith(LAZY)) {
@@ -1002,7 +1012,6 @@ function finalChecks(ctx: Ctx): void {
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const ctx = newCtx();
-  lastDefEnd = -1;
   const { blocks } = parseBlocks(body.split('\n'), ctx);
   finalChecks(ctx);
   // 對帳：原文每一個 <!--，不是被當成註解藏起來，就是落在程式碼裡；對不上＝有一個註解符號跑進了正文（或內容不見了），擋下。
