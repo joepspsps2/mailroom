@@ -64,7 +64,8 @@ function blockHtml(b: Block, c: Ctx, last = false): string {
     case 'list': {
       const tag = b.ordered ? 'ol' : 'ul';
       const items = b.items.map((it) => `<li class="mr-text" style="margin:0 0 8px;font-size:16px;line-height:1.8;${T(c)}">${listItemHtml(it, c)}</li>`).join('');
-      return `<${tag} style="margin:0 0 ${mb};padding-left:24px">${items}</${tag}>`;
+      const start = b.ordered && b.start !== undefined ? ` start="${b.start}"` : '';
+      return `<${tag}${start} style="margin:0 0 ${mb};padding-left:24px">${items}</${tag}>`;
     }
     case 'code':
       return `<pre class="mr-code mr-text" style="margin:0 0 ${mb};padding:12px 14px;background:${c.theme.codeBg};font-family:Menlo,Consolas,monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;color:${c.theme.text}">${escapeHtml(b.v)}</pre>`;
@@ -131,7 +132,7 @@ function blockText(b: Block, l: Labels, indent = ''): string {
     case 'list':
       return b.items
         .map((it, i) => {
-          const mark = b.ordered ? `${i + 1}. ` : '- ';
+          const mark = b.ordered ? `${(b.start ?? 1) + i}. ` : '- ';
           const body = it.map((x) => blockText(x, l)).join('\n\n');
           const [first, ...rest] = body.split('\n');
           return pad([mark + first, ...rest.map((x) => (x === '' ? x : ' '.repeat(mark.length) + x))].join('\n'));
