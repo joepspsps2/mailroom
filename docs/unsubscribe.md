@@ -74,7 +74,7 @@ A reader who wrote in has clearly asked to stop, so these three cases raise an a
 
 The alert is a plain webhook, not tied to any service: `POST` JSON `{ event, at, from?, subject?, token?, via?, text, content }` to `UNSUB_ALERT_WEBHOOK`
 (https only; optional `UNSUB_ALERT_TOKEN` is sent as a Bearer token; 5-second timeout; a failing webhook never breaks request handling).
-`token` is the full token and `claims` (`list`, `contactId`, `campaign`) is read from it when its shape is right, so a person can tell who it was. Control characters are stripped from `from`, `subject` and `token`; at most 20 alerts per minute are sent per Worker instance (the rest are only logged), so nobody can flood the channel. `text` and `content` hold the same one-line summary so common chat webhooks work through a small relay.
+`token` is the full token and `claims` (`list`, `contactId`, `campaign`) is read from it when its shape is right, so a person can tell who it was. Control characters are stripped from `from`, `subject` and `token`; web-page alerts are capped at 20 per minute and mail alerts at 60 per minute per Worker instance (separate budgets, so noise typed into the web page never hides a real unsubscribe mail; the rest are only logged). `text` and `content` hold the same one-line summary so common chat webhooks work through a small relay.
 
 **If `UNSUB_ALERT_WEBHOOK` is not set**, nothing is lost silently: the same payload is written to the Worker log (`console.error`, visible only to the account owner; the log carries only the first 8 characters of the token plus `claims`, since a full token can unsubscribe that person),
 and a warning is logged once per isolate (and on each scheduled run).

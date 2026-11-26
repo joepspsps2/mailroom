@@ -153,7 +153,7 @@ test('網頁路徑的壞券：亂打的字串不告警；形狀對但簽章不�
   assert.deepEqual(sent[0].body.claims, { list: 'weekly', contactId: 1, campaign: null });
 });
 
-test('告警：log 不放完整券（完整券只走 webhook）；控制字元與換行被清掉；一分鐘超過 20 則只寫 log', async () => {
+test('告警：log 不放完整券（完整券只走 webhook）；控制字元與換行被清掉；信件與網頁各有額度', async () => {
   const { db, token } = await setup();
   const sent: Sent[] = [];
   const q = quiet();
@@ -165,6 +165,18 @@ test('告警：log 不放完整券（完整券只走 webhook）；控制字元�
   assert.ok(!/[\n\r]/.test(sent[0].body.from + sent[0].body.text));
   for (let i = 0; i < 30; i++) await handleEmailMessage(db, env, mail(`hello ${i}`).m, fakeFetch(200, sent));
   q.restore();
+  assert.equal(sent.length, 31); // 信件額度 60／分：這 31 則都送出（同一個 isolate 的網頁額度另計）
+  assert.ok(!q.lines.some((l) => l.includes('rate limited')));
+});
+
+test('告警額度分開：網頁亂打灌爆自己的額度後，退訂信的告警照送', async () => {
+  const { sendAlert } = await import('../src/alert.ts');
+  const sent: Sent[] = [];
+  const f = fakeFetch(200, sent);
+  const q = quiet();
+  for (let i = 0; i < 30; i++) await sendAlert({ url: 'https://alerts.example.com/h', fetch: f }, { event: 'unsub_token_invalid', via: 'page', token: 'x' });
   assert.equal(sent.length, 20);
-  assert.ok(q.lines.some((l) => l.includes('rate limited')));
+  assert.equal(await sendAlert({ url: 'https://alerts.example.com/h', fetch: f }, { event: 'unsub_write_failed', via: 'mailto', token: 'y', from: 'r@example.org' }), true);
+  q.restore();
+  assert.equal(sent.length, 21);
 });
