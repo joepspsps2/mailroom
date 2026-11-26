@@ -44,8 +44,22 @@ function classify(html: string): Map<string, Where[]> {
       continue;
     }
     if (html[i] === '<') {
-      const end = html.indexOf('>', i);
+      // 標籤結尾的 >：屬性值引號裡的 > 不算（替代文字裡可能有 </em> 之類）
+      let end = -1;
+      for (let k = i + 1, q = ''; k < html.length; k++) {
+        const ch = html[k];
+        if (q) {
+          if (ch === q) q = '';
+        } else if (ch === '"' || ch === "'") q = ch;
+        else if (ch === '>') {
+          end = k;
+          break;
+        }
+      }
+      if (end < 0) break; // 沒有收尾的 <：後面不會再有正文（不然會無限迴圈）
       const tag = html.slice(i, end + 1);
+      // 圖片的替代文字：網站上是圖片說明（不是藏起來的內容），信裡也會印出來，算「看得到」
+      if (/^<img\b/i.test(tag)) for (const m of (tag.match(/\balt="([^"]*)"/)?.[1] ?? '').matchAll(TOKEN)) (out.get(m[0]) ?? out.set(m[0], []).get(m[0])!).push('text');
       if (/^<code\b/i.test(tag)) code++;
       else if (/^<\/code>/i.test(tag)) code = Math.max(0, code - 1);
       i = end + 1;

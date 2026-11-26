@@ -441,33 +441,67 @@ const TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 /** 懶惰續行的記號：引言或清單收進來的「沒縮排、接在段落後面」的行，在內層一律當段落續行（不能變成表頭或標題底線）。 */
 const LAZY = '\uE002';
 
-/** 行首縮排的欄數（tab 跳到 4 的倍數）。 */
-function indentCols(line: string): number {
-  let c = 0;
+/*
+ * tab 的欄位：CommonMark 的 tab 是跳到「絕對欄位」4 的倍數。引言、清單裡的行拿掉外層記號後，行首不再是第 0 欄，
+ * 所以下面幾個函式都帶 col＝這一行在原稿裡從第幾欄開始。只在判斷「縮了幾格、是什麼區塊」時換算；
+ * 程式碼內容一律從原行切出來，裡面的 tab 原樣保留（不然 Go、Makefile 的 tab 會被悄悄換成空白）。
+ */
+/** 行首縮排的欄數。 */
+function indentCols(line: string, col = 0): number {
+  let c = col;
   for (const ch of line) {
     if (ch === ' ') c++;
     else if (ch === '\t') c += 4 - (c % 4);
     else break;
   }
-  return c;
+  return c - col;
 }
 
-/** 去掉行首最多 n 欄的空白（tab 只拿掉需要的部分）。 */
-function stripCols(line: string, n: number): string {
-  let c = 0;
+/** 去掉行首最多 n 欄的空白（tab 跨過界線時，剩下的欄數補成空白）。 */
+function stripCols(line: string, n: number, col = 0): string {
+  let c = col;
   let i = 0;
-  while (i < line.length && c < n) {
+  while (i < line.length && c < col + n) {
     if (line[i] === ' ') {
       c++;
       i++;
     } else if (line[i] === '\t') {
       const w = 4 - (c % 4);
-      if (c + w > n) return ' '.repeat(c + w - n) + line.slice(i + 1);
+      if (c + w > col + n) return ' '.repeat(c + w - col - n) + line.slice(i + 1);
       c += w;
       i++;
     } else break;
   }
   return line.slice(i);
+}
+
+/** 縮排不到 4 欄（不是程式碼）的行：行首空白換成等寬的空格，給只認空格的區塊判斷用。 */
+function normLead(line: string, col: number): string {
+  if (line.startsWith(LAZY)) return line;
+  const lead = line.match(/^[ \t]*/)![0];
+  if (!lead.includes('\t')) return line;
+  const k = indentCols(line, col);
+  return k >= 4 ? line : ' '.repeat(k) + line.slice(lead.length);
+}
+
+/** 拿掉一行引言記號 >（和它後面可省略的一格；後面是 tab 時只吃掉一欄）。qcol＝引言內層的起始欄。 */
+function stripQuote(line: string, col: number, qcol: number): string {
+  const m = line.match(/^( {0,3})>/)!;
+  let rest = line.slice(m[0].length);
+  let p = col + m[1].length + 1;
+  if (rest[0] === ' ') {
+    rest = rest.slice(1);
+    p++;
+  } else if (rest[0] === '\t') {
+    rest = ' '.repeat(3 - (p % 4)) + rest.slice(1);
+    p++;
+  }
+  // 這一行內層起點跟其他行不同（> 前面縮排不一樣）而行首還有 tab：照它自己的欄位換成空格，免得對不齊
+  if (p !== qcol && /^[ ]*\t/.test(rest)) {
+    const lead = rest.match(/^[ \t]*/)![0];
+    rest = ' '.repeat(indentCols(rest, p)) + rest.slice(lead.length);
+  }
+  return rest;
 }
 
 interface Fence {
@@ -497,14 +531,14 @@ interface Marker {
   first: string;
   empty: boolean;
 }
-function listMarker(line: string): Marker | null {
+function listMarker(line: string, col = 0): Marker | null {
   if (HR.test(line)) return null;
   const m = line.match(/^( {0,3})([-*+]|(\d{1,9})([.)]))(?=[ \t]|$)([ \t]*)(.*)$/);
   if (!m) return null;
   const ordered = m[3] !== undefined;
   const at = m[1].length + m[2].length;
   let spaces = 0;
-  for (const ch of m[5]) spaces += ch === '\t' ? 4 - ((at + spaces) % 4) : 1;
+  for (const ch of m[5]) spaces += ch === '\t' ? 4 - ((col + at + spaces) % 4) : 1;
   const empty = m[6].trim() === '';
   const base = { ordered, kind: ordered ? m[4] : m[2], start: ordered ? Number(m[3]) : 0, empty };
   if (empty) return { ...base, content: at + 1, first: '' };
@@ -531,23 +565,31 @@ function splitRow(line: string): string[] {
   return cells;
 }
 
-function isTableStart(line: string, next: string | undefined): boolean {
-  return line.trim() !== '' && next !== undefined && TABLE_SEP.test(next) && next.includes('|') && splitRow(line).length === splitRow(next).length;
+/** 表格開頭：這一行＋下一行是分隔列（要有 |、格數相同）。兩行都不能縮 4 欄以上，也不能本身是清單項目、標題、引言（那些先成立）。 */
+function isTableStart(line: string, next: string | undefined, col = 0): boolean {
+  if (next === undefined || line.trim() === '' || next.startsWith(LAZY)) return false;
+  line = normLead(line, col);
+  next = normLead(next, col);
+  if (indentCols(line) >= 4 || indentCols(next) >= 4) return false;
+  if (listMarker(line, col) || listMarker(next, col) || ATX.test(line) || QUOTE.test(line) || QUOTE.test(next) || fenceOpen(line)) return false;
+  return TABLE_SEP.test(next) && next.includes('|') && splitRow(line).length === splitRow(next).length;
 }
 
 /** 這一行能不能打斷同一層正在進行的段落（CommonMark 的規則：有序清單要從 1 開始、空項目不行、縮 4 格以上不行）。 */
-function interrupts(line: string, next: string | undefined, tables = true): boolean {
-  if (indentCols(line) >= 4) return false;
+function interrupts(line: string, next: string | undefined, tables = true, col = 0): boolean {
+  if (indentCols(line, col) >= 4) return false;
+  line = normLead(line, col);
   if (fenceOpen(line) || HR.test(line) || ATX.test(line) || QUOTE.test(line) || COMMENT_START.test(line) || HTML_INTERRUPT.test(line)) return true;
-  const lm = listMarker(line);
+  const lm = listMarker(line, col);
   if (lm && !lm.empty && (!lm.ordered || lm.start === 1)) return true;
-  return tables && isTableStart(line, next);
+  return tables && isTableStart(line, next, col);
 }
 
 /** 懶惰續行（引言、清單裡沒縮排的下一行）：只有「內層最後是一個還開著的段落」才接得上；任何清單項目、區塊開頭都會斷開（表格不會：那時表頭只是段落續行）。 */
-function lazyBreaks(line: string): boolean {
-  if (indentCols(line) >= 4) return false;
-  return !!fenceOpen(line) || HR.test(line) || ATX.test(line) || QUOTE.test(line) || COMMENT_START.test(line) || HTML_INTERRUPT.test(line) || LONE_TAG.test(line) || listMarker(line) !== null;
+function lazyBreaks(line: string, col = 0): boolean {
+  if (indentCols(line, col) >= 4) return false;
+  line = normLead(line, col);
+  return !!fenceOpen(line) || HR.test(line) || ATX.test(line) || QUOTE.test(line) || COMMENT_START.test(line) || HTML_INTERRUPT.test(line) || LONE_TAG.test(line) || listMarker(line, col) !== null;
 }
 
 /** 註解區塊收尾那一行，--> 後面剩下的字（網站上原樣當 HTML 顯示）：再藏掉裡面的註解，其他照字面留著。 */
@@ -570,6 +612,7 @@ function rawTail(rest: string, ctx: Ctx): Block | null {
     hideComment(rest.slice(c, e), ctx);
     pos = e;
   }
+  if (PSEUDO_COMMENT.test(out)) ctx.problems.push({ code: 'unsupported_html', severity: 'error', ...tagProblem(out.match(PSEUDO_COMMENT)![0], false) });
   const tag = out.match(/<\/?[a-zA-Z][^>]*>/);
   if (tag) ctx.problems.push({ code: 'unsupported_html', severity: 'error', ...tagProblem(tag[0], false) });
   const v = decodeEntities(out.trim());
@@ -577,7 +620,7 @@ function rawTail(rest: string, ctx: Ctx): Block | null {
 }
 
 /** 段落：從 lines[start] 收到空行或能打斷段落的行為止；下一行是 === 或 --- ＝標題（setext）。回傳下一個要看的行。 */
-function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[]): number {
+function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[], col: number): number {
   const n = lines.length;
   const unlazy = (l: string) => (l.startsWith(LAZY) ? l.slice(1) : l);
   const para: string[] = [unlazy(lines[start])];
@@ -587,13 +630,13 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[]): n
     const l = lines[i];
     if (l.trim() === '') break;
     if (!l.startsWith(LAZY)) {
-      const sx = indentCols(l) < 4 ? l.match(SETEXT) : null;
+      const sx = indentCols(l, col) < 4 ? normLead(l, col).match(SETEXT) : null;
       if (sx) {
         setext = sx[1][0] === '=' ? 1 : 2;
         i++;
         break;
       }
-      if (interrupts(l, lines[i + 1]) || (BLOCK_HTML.test(l) && EMBED_TAG.test(l))) break;
+      if (interrupts(l, lines[i + 1], true, col) || (BLOCK_HTML.test(normLead(l, col)) && EMBED_TAG.test(l))) break;
     }
     para.push(unlazy(l));
     i++;
@@ -610,33 +653,38 @@ function paragraph(lines: string[], start: number, ctx: Ctx, blocks: Block[]): n
 }
 
 /** 把一個容器（整份原稿、引言內層、清單項目）的行切成區塊。open＝最後一個區塊是還開著的段落（給懶惰續行判斷）。 */
-function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolean } {
+function parseBlocks(lines: string[], ctx: Ctx, col = 0): { blocks: Block[]; open: boolean } {
   const blocks: Block[] = [];
   const n = lines.length;
   let open = false;
   // 沒收尾的註解區塊：CommonMark 裡它一路延伸到容器結尾，所以容器最後不是「開著的段落」，懶惰續行接不上
   let unclosedHtml = false;
+  // 上一個區塊是縮排程式碼：網站的引擎在它後面不認「不是從 1 開始的有序清單」，當成段落（照網站做）
+  let afterIndentedCode = false;
   let i = 0;
   while (i < n) {
-    const line = lines[i];
+    const line = normLead(lines[i], col);
     open = false;
     if (line.trim() === '') {
       i++;
       continue;
     }
+    const prevIndentedCode = afterIndentedCode;
+    afterIndentedCode = false;
     if (line.startsWith(LAZY)) {
-      i = paragraph(lines, i, ctx, blocks);
+      i = paragraph(lines, i, ctx, blocks, col);
       open = i >= n;
       continue;
     }
     // 縮排 4 格以上＝程式碼（段落中間的縮排行不算，那是段落續行）
-    if (indentCols(line) >= 4) {
+    if (indentCols(lines[i], col) >= 4) {
       const body: string[] = [];
-      while (i < n && (lines[i].trim() === '' || indentCols(lines[i]) >= 4)) body.push(stripCols(lines[i++], 4));
+      while (i < n && (lines[i].trim() === '' || indentCols(lines[i], col) >= 4)) body.push(stripCols(lines[i++], 4, col));
       while (body.length && body[body.length - 1].trim() === '') body.pop();
       const v = body.join('\n');
       ctx.inCode += marks(v);
       blocks.push({ t: 'code', v: protectBraces(v) });
+      afterIndentedCode = true;
       continue;
     }
     // 圍欄程式碼
@@ -646,12 +694,12 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       i++;
       let closed = false;
       while (i < n) {
-        if (fenceCloses(lines[i], fence)) {
+        if (fenceCloses(normLead(lines[i], col), fence)) {
           closed = true;
           i++;
           break;
         }
-        body.push(stripCols(lines[i++], fence.indent));
+        body.push(stripCols(lines[i++], fence.indent, col));
       }
       // 沒收尾的程式碼框：網站上它會把後面整段都變成程式碼，所以記 error
       if (!closed) ctx.problems.push({ code: 'unclosed_fence', severity: 'error', message: '程式碼框（```）沒有收尾，後面的內容會被吃掉', where: clip(line) });
@@ -688,7 +736,7 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       }
       const text = j === i ? line.slice(col, close + 3) : [line.slice(col), ...lines.slice(i + 1, j), lines[j].slice(0, close + 3)].join('\n');
       hideComment(text, ctx);
-      const tail = rawTail(lines[j].slice(close + 3), ctx);
+      const tail = rawTail((j === i ? line : lines[j]).slice(close + 3), ctx); // 同一行收尾時用換算過 tab 的那一行，位置才對得上
       if (tail) blocks.push(tail);
       i = j + 1;
       continue;
@@ -725,31 +773,32 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
     }
     if (QUOTE.test(line)) {
       const inner: string[] = [];
+      const qcol = col + line.match(/^ */)![0].length + 2;
       while (i < n) {
-        const l = lines[i];
+        const l = normLead(lines[i], col);
         if (QUOTE.test(l)) {
-          inner.push(l.replace(/^ {0,3}> ?/, ''));
+          inner.push(stripQuote(l, col, qcol));
           i++;
           continue;
         }
-        if (l.trim() !== '' && inner.length > 0 && !lazyBreaks(l) && parseBlocks(inner, scratch()).open) {
+        if (l.trim() !== '' && inner.length > 0 && !lazyBreaks(l, col) && parseBlocks(inner, scratch(), qcol).open) {
           inner.push(l.startsWith(LAZY) ? l : LAZY + l);
           i++;
           continue;
         }
         break;
       }
-      const r = parseBlocks(inner, ctx);
+      const r = parseBlocks(inner, ctx, qcol);
       blocks.push({ t: 'quote', c: r.blocks });
       open = r.open && i >= n;
       continue;
     }
-    if (isTableStart(line, lines[i + 1])) {
+    if (isTableStart(line, lines[i + 1], col)) {
       const head = splitRow(line);
       const align = splitRow(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? 'center' : /^-+:$/.test(c) ? 'right' : /^:-+$/.test(c) ? 'left' : null));
       i += 2;
       const rows: Inline[][][] = [];
-      while (i < n && lines[i].trim() !== '' && indentCols(lines[i]) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1], false)) {
+      while (i < n && lines[i].trim() !== '' && indentCols(lines[i], col) < 4 && !lines[i].startsWith(LAZY) && !interrupts(lines[i], lines[i + 1], false, col)) {
         const cells = splitRow(lines[i++]);
         while (cells.length < head.length) cells.push('');
         for (const extra of cells.slice(head.length)) ctx.hidden += marks(extra); // 多出來的格子網站上也不顯示（表格裡再出現像表頭的兩行，也只是一般的列）
@@ -758,7 +807,8 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       blocks.push({ t: 'table', head: head.map((c) => parseInline(c, ctx)), align, rows });
       continue;
     }
-    const first = listMarker(line);
+    const lm = listMarker(line, col);
+    const first = lm && !(prevIndentedCode && lm.ordered && lm.start !== 1) ? lm : null;
     if (first) {
       const items: Block[][] = [];
       let cur = first;
@@ -772,31 +822,31 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
             let j = i;
             while (j < n && lines[j].trim() === '') j++;
             const startsBlank = itemLines.length === 1 && itemLines[0] === '';
-            if (j < n && indentCols(lines[j]) >= cur.content && !startsBlank) {
+            if (j < n && indentCols(lines[j], col) >= cur.content && !startsBlank) {
               for (; i < j; i++) itemLines.push('');
               continue;
             }
             break;
           }
-          if (indentCols(l) >= cur.content) {
-            itemLines.push(stripCols(l, cur.content));
+          if (indentCols(l, col) >= cur.content) {
+            itemLines.push(stripCols(l, cur.content, col));
             i++;
             continue;
           }
-          if (!lazyBreaks(l) && parseBlocks(itemLines, scratch()).open) {
+          if (!lazyBreaks(l, col) && parseBlocks(itemLines, scratch(), col + cur.content).open) {
             itemLines.push(l.startsWith(LAZY) ? l : LAZY + l); // 懶惰續行
             i++;
             continue;
           }
           break;
         }
-        const r = parseBlocks(itemLines, ctx);
+        const r = parseBlocks(itemLines, ctx, col + cur.content);
         items.push(r.blocks);
         open = r.open && i >= n;
         // 下一個同類的清單記號＝同一張清單的下一項（中間可以有空行）
         let j = i;
         while (j < n && lines[j].trim() === '') j++;
-        const next = j < n ? listMarker(lines[j]) : null;
+        const next = j < n ? listMarker(normLead(lines[j], col), col) : null;
         if (next && next.ordered === first.ordered && next.kind === first.kind) {
           i = j;
           cur = next;
@@ -809,29 +859,22 @@ function parseBlocks(lines: string[], ctx: Ctx): { blocks: Block[]; open: boolea
       continue;
     }
     // 段落
-    i = paragraph(lines, i, ctx, blocks);
+    i = paragraph(lines, i, ctx, blocks, col);
     open = i >= n && blocks[blocks.length - 1]?.t !== 'h';
   }
   return { blocks, open: open && !unclosedHtml };
 }
 
-/**
- * 行首的結構前綴（空白、tab、引言 >、清單記號）裡的 tab，照「絕對欄位」換成空白（CommonMark 的 tab 是跳到 4 的倍數）。
- * 這樣拿掉 > 或清單記號之後，剩下的縮排欄數才不會算錯（例：「>\t<!--」是引言裡的註解，不是縮排程式碼）。
- */
-function expandPrefixTabs(line: string): string {
-  const m = line.match(/^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)])(?=[ \t]|$))*[ \t]*/);
-  const pre = m ? m[0] : '';
-  if (!pre.includes('\t')) return line;
-  let out = '';
-  for (const ch of pre) out += ch === '\t' ? ' '.repeat(4 - (out.length % 4)) : ch;
-  return out + line.slice(pre.length);
-}
-
 export function parseMarkdown(source: string): Parsed {
   const { body, fm } = splitFrontmatter(source);
   const ctx: Ctx = { problems: [], hidden: 0, inCode: 0 };
-  const { blocks } = parseBlocks(body.split('\n').map(expandPrefixTabs), ctx);
+  const { blocks } = parseBlocks(body.split('\n'), ctx);
+  // 腳註定義（[^名稱]: …）在全文沒被引用時，網站整段不顯示；信裡照段落印出來就會多出網站看不到的字，記 error
+  for (const m of body.matchAll(/^ {0,3}\[\^([^\]\s]+)\]:/gm)) {
+    const ref = `[^${m[1]}]`;
+    const used = body.split(ref).length - 1 > body.split(`${ref}:`).length - 1;
+    if (!used) ctx.problems.push({ code: 'unsupported_syntax', severity: 'error', message: `腳註 ${ref} 有定義但沒被引用，網站上不顯示；請刪掉或在正文引用它`, where: clip(m[0]) });
+  }
   // 對帳：原文每一個 <!--，不是被當成註解藏起來，就是落在程式碼裡；對不上＝有一個註解符號跑進了正文（或內容不見了），擋下。
   const total = marks(body);
   if (total !== ctx.hidden + ctx.inCode && !ctx.problems.some((p) => p.code === 'unclosed_comment')) {
