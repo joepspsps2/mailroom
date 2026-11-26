@@ -73,7 +73,7 @@ function codeMarks(html: string): string[] {
 function makeGen(seed: number) {
   let s = seed >>> 0;
   const r = () => {
-    s = (Math.imul(s, 1103515245) + 12345) >>> 0;
+    s = (Math.imul(s, 0x41c64e6d) + 12345) >>> 0;
     return (s >>> 8) / 0x1000000;
   };
   const pick = <T,>(a: T[]): T => a[Math.floor(r() * a.length)];
