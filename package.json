@@ -9,7 +9,8 @@
     "url": "git+https://github.com/joepspsps2/mailroom.git"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./compose": "./src/compose/index.ts"
   },
   "files": [
     "src",
