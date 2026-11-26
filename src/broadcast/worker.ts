@@ -7,6 +7,7 @@ import type { CampaignRow } from './campaigns.ts';
 import { consumeBatch, tick, type BroadcastDeps, type BroadcastMessage, type QueueMessageLike, type RecipientRow, type RenderResult } from './dispatch.ts';
 import type { IngestOptions } from './events.ts';
 import { FakePostman, type FakeRule, type Postman } from './postman.ts';
+import { parseAllowed, type TestSendDeps } from './test-send.ts';
 import { SesPostman } from './ses.ts';
 
 export interface BroadcastEnv {
@@ -37,6 +38,8 @@ export interface BroadcastEnv {
   UNSUB_TOKEN_SECRET_PREVIOUS?: string;
   UNSUB_BASE_URL?: string;
   UNSUB_MAILTO?: string;
+  /** 允許收測試信的內部信箱（JSON 陣列或逗號分隔）。沒設＝測試信功能關閉。 */
+  TEST_RECIPIENTS?: string | string[];
 }
 
 export const DEFAULT_BROADCAST_QUEUE = 'mailroom-broadcast';
@@ -139,6 +142,12 @@ export function broadcastDeps(env: BroadcastEnv, wiring: BroadcastWiring = {}): 
     feedback: wiring.feedback,
     alert: wiring.alert ?? ((a) => (a.level === 'info' ? console.log : console.warn)('broadcast', a.level, a.code, a.campaign ?? '-', a.message)),
   };
+}
+
+/** 管理入口的測試信設定（郵差、個人化、白名單）。群發沒開＝undefined。 */
+export function testSendDeps(env: BroadcastEnv, wiring: BroadcastWiring = {}): Omit<TestSendDeps, 'domain' | 'now'> | undefined {
+  const d = broadcastDeps(env, wiring);
+  return d ? { postman: d.postman, render: d.render, allowed: parseAllowed(env.TEST_RECIPIENTS) } : undefined;
 }
 
 /** 排程每分鐘呼叫。沒設定群發就什麼都不做。 */

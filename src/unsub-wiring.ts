@@ -1,7 +1,7 @@
 // 把設定（Env）接到退訂模組：端點設定、收信退訂的處理。不 import cloudflare:*，測試可以直接呼叫。
 
 import { type Db } from './core.ts';
-import { sendAlert, warnIfNoAlert, type AlertConfig } from './alert.ts';
+import { flushSuppressedAlerts, sendAlert, warnIfNoAlert, type AlertConfig } from './alert.ts';
 import { handleUnsubMail, pageText, unsubSecrets, unsubTokenShape, type UnsubHandlerConfig, type UnsubMailOutcome } from './unsub.ts';
 
 export interface UnsubEnv {
@@ -12,6 +12,11 @@ export interface UnsubEnv {
   UNSUB_ALERT_WEBHOOK?: string;
   /** 選填：告警 webhook 的 Bearer 口令（Secret）。 */
   UNSUB_ALERT_TOKEN?: string;
+}
+
+/** 排程呼叫：時間窗過了、而且有退訂告警被額度壓掉，就補送一則彙總。 */
+export function flushUnsubAlerts(env: UnsubEnv, fetchFn?: typeof fetch): Promise<number> {
+  return flushSuppressedAlerts({ url: env.UNSUB_ALERT_WEBHOOK, token: env.UNSUB_ALERT_TOKEN, fetch: fetchFn });
 }
 
 export function unsubConfig(env: UnsubEnv, fetchFn?: typeof fetch): UnsubHandlerConfig {

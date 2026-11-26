@@ -16,3 +16,6 @@ export { reconcileCampaign, type ReconcileReport } from './reconcile.ts';
 export { campaignRates, domainRates, type CampaignRates } from './stats.ts';
 export { campaignStatus, throttleStatus } from './status.ts';
 export { currentStep, evaluateWarmup, planBlocked, planSteps, unblockWarmup, upsertWarmupStep, type GateResult, type StepInput, type WarmupStepRow } from './warmup.ts';
+export { explainPause, type PauseExplanation } from './explain.ts';
+export { parseAllowed, previewContent, sendTest, MAX_TEST_RECIPIENTS, type TestSendDeps } from './test-send.ts';
+export { audiencePlan, type AudiencePlan } from './audience.ts';

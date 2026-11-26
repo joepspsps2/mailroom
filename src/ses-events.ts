@@ -298,7 +298,8 @@ export function normalizeSesEvent(ev: unknown, snsMessageId: string, opts: { con
   const destination = (Array.isArray(mail.destination) ? mail.destination : []).map(addr).filter((a): a is string => !!a);
   const campaign = tag(mail.tags, 'campaign');
   const contactRaw = tag(mail.tags, 'contact');
-  const contact = contactRaw && /^\d{1,15}$/.test(contactRaw) ? contactRaw : null;
+  // 'test'＝測試信的標記，原樣保留（下游靠它不把測試信箱加進拒收名單）；其餘只收數字。
+  const contact = contactRaw === 'test' || (contactRaw && /^\d{1,15}$/.test(contactRaw)) ? contactRaw : null;
   const base = { provider: 'ses', providerMessageId, campaign, contact };
   const make = (type: EventType, list: string[], at: unknown, extra: Partial<ProviderEvent> = {}): ProviderEvent[] =>
     list.map((email, i) => ({

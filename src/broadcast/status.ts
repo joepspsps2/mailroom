@@ -5,9 +5,10 @@ import type { ListDb } from '../lists.ts';
 import { getCampaign } from './campaigns.ts';
 import { resolveConfig, type BroadcastConfig } from './config.ts';
 import { activeHold } from './dispatch.ts';
+import { explainPause } from './explain.ts';
 import { campaignRates } from './stats.ts';
 
-export async function campaignStatus(db: ListDb, id: string) {
+export async function campaignStatus(db: ListDb, id: string, config?: Partial<BroadcastConfig> | string) {
   const c = await getCampaign(db, id);
   if (!c) return null;
   const states = (await db.prepare('SELECT state, skip_reason, wave, COUNT(*) AS n FROM campaign_recipients WHERE campaign_id = ? GROUP BY state, skip_reason, wave ORDER BY wave').bind(id).all()).results;
@@ -31,8 +32,14 @@ export async function campaignStatus(db: ListDb, id: string) {
     approved: c.approved_hash !== null && c.approved_hash === c.content_hash, approvedAt: c.approved_at, approvedNote: c.approved_note,
     preflight: parse(c.preflight), scheduledAt: c.scheduled_at, startedAt: c.started_at, frozenAt: c.frozen_at,
     lastReleaseAt: c.last_release_at, lastProgressAt: c.last_progress_at, finishedAt: c.finished_at,
-    recipients: states, rates, counts,
+    recipients: states, rates, counts, pauseExplain: explainPause(c.pause_reason, resolveConfig(config)),
+    previewed: previewedHash(counts) === c.content_hash,
   };
+}
+
+/** 預覽記號：POST preview 時記下當時的內容雜湊；內容一改就對不上。 */
+export function previewedHash(counts: unknown): string | null {
+  return counts && typeof counts === 'object' && typeof (counts as { previewHash?: unknown }).previewHash === 'string' ? (counts as { previewHash: string }).previewHash : null;
 }
 
 export async function throttleStatus(db: ListDb, domain: string, config?: Partial<BroadcastConfig> | string, now = new Date()) {

@@ -30,6 +30,12 @@ export interface BroadcastConfig {
   domainWindowDays: number;
   /** 視窗內寄出少於這個數，不算滾動比率（樣本太小）。 */
   domainMinSent: number;
+  /** 寄件網域檢舉率要停整個網域，除了比率之外，視窗內至少要有這麼多件檢舉（預設 1＝沒有額外下限，照原本規則）。樣本小時 1 件就過線，試寄演練前依實況決定要不要調高。 */
+  domainMinComplaints: number;
+  /** 分波閘門要判斷上一波，至少要有這麼多封已寄出（預設 1＝沒有額外下限）。每波人數少時 1 封退信就會讓比率過線。 */
+  waveGateMinSent: number;
+  /** 已排程的期過了原定時間超過這麼多分鐘還沒開寄（郵差不健康、網域停寄、Worker 停擺…），就退回「已核准」等人重排，不自動開寄。 */
+  startGraceMinutes: number;
   /** 「已交 Queue」超過幾分鐘沒有結果 → 退回待放水、重新放（去重鍵保證不重寄）。 */
   stuckMinutes: number;
   /** 有交出去的工作、卻這麼多分鐘沒有任何一封有結果 → 判定 Queue 壞了，暫停本期。 */
@@ -72,6 +78,9 @@ export const DEFAULT_BROADCAST_CONFIG: Readonly<BroadcastConfig> = Object.freeze
   domainComplaintRate: 0.0008,
   domainWindowDays: 30,
   domainMinSent: 200,
+  domainMinComplaints: 1,
+  waveGateMinSent: 1,
+  startGraceMinutes: 360,
   stuckMinutes: 10,
   stallMinutes: 30,
   maxAttempts: 3,
@@ -87,6 +96,8 @@ export const DEFAULT_BROADCAST_CONFIG: Readonly<BroadcastConfig> = Object.freeze
 });
 
 const SITE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** 「下限」類設定的上限：設太大等於把那道煞車關掉，超過就當寫錯、用預設值（並在 log 留一行）。 */
+const MAX_VALUE: Partial<Record<keyof BroadcastConfig, number>> = { domainMinComplaints: 10, waveGateMinSent: 100, startGraceMinutes: 2880 };
 
 /**
  * 合併設定：只收「型別對、數值合理」的欄位，其他一律用預設值（寫錯不能變成「不設防」）。
@@ -114,6 +125,11 @@ export function resolveConfig(over?: Partial<BroadcastConfig> | string | null): 
     if (typeof n !== 'number' || !Number.isFinite(n)) continue;
     const isRate = key.endsWith('Rate') || key === 'rateFactor' || key === 'gateOpenDrop';
     if (isRate ? n < 0 || n > 1 : key === 'utcOffsetHours' ? n < -14 || n > 14 : n <= 0) continue;
+    const cap = MAX_VALUE[key];
+    if (cap !== undefined && n > cap) {
+      console.error(`broadcast config ${key} above ${cap}: using the default`);
+      continue;
+    }
     (out as unknown as Record<string, number>)[key] = n;
   }
   return out;

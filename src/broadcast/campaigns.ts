@@ -54,7 +54,7 @@ export interface CampaignRow {
   finished_at: string | null; pause_reason: string | null; counts: string | null; created_at: string; updated_at: string;
 }
 
-export type Fail = { ok: false; reason: string; status?: CampaignStatus };
+export type Fail = { ok: false; reason: string; status?: CampaignStatus; twin?: string; twinStatus?: CampaignStatus; twinBy?: 'web_url' | 'content' | 'source_ref' };
 export type Ok<T = object> = { ok: true } & T;
 
 export const CAMPAIGN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -105,6 +105,36 @@ export function checkWaves(w: unknown): string[][] | null {
   return out;
 }
 
+/** 網頁版網址比對用：主機小寫、去掉 utm 參數與 #片段、路徑結尾斜線、預設埠。 */
+export function normalizeWebUrl(u: string): string {
+  try {
+    const x = new URL(u);
+    x.hash = '';
+    for (const k of [...x.searchParams.keys()]) if (/^utm_/i.test(k)) x.searchParams.delete(k);
+    x.searchParams.sort();
+    const path = x.pathname.replace(/\/+$/, '') || '/';
+    return `${x.protocol}//${x.host.toLowerCase()}${path}${x.search}`;
+  } catch {
+    return u.trim().toLowerCase();
+  }
+}
+
+async function findTwin(db: Db, input: CampaignInput, _hash: string): Promise<{ id: string; status: CampaignStatus; by: 'web_url' | 'content' | 'source_ref' } | null> {
+  const rows = (
+    await db
+      .prepare("SELECT id, status, web_url, source_ref, (list_id = ? AND html = ? AND text = ?) AS same_body FROM campaigns WHERE id <> ? AND status <> 'cancelled'")
+      .bind(input.list, input.html, input.text, input.id)
+      .all<{ id: string; status: CampaignStatus; web_url: string | null; source_ref: string | null; same_body: number }>()
+  ).results;
+  const mine = input.webUrl ? normalizeWebUrl(input.webUrl) : null;
+  for (const r of rows) {
+    if (mine && r.web_url && normalizeWebUrl(r.web_url) === mine) return { id: r.id, status: r.status, by: 'web_url' };
+    if (Number(r.same_body) === 1) return { id: r.id, status: r.status, by: 'content' };
+    if (input.sourceRef && r.source_ref === input.sourceRef && r.status !== 'done') return { id: r.id, status: r.status, by: 'source_ref' };
+  }
+  return null;
+}
+
 function checkInput(input: CampaignInput, marketingDomain: string): string | null {
   if (!input || typeof input !== 'object') return 'bad_request';
   if (typeof input.id !== 'string' || !CAMPAIGN_ID.test(input.id)) return 'bad_id';
@@ -144,6 +174,10 @@ export async function saveDraft(db: Db, input: CampaignInput, opts: { marketingD
   const headers = input.headers ? JSON.stringify(input.headers) : null;
   const t = nowIso(opts.now);
   const existing = await getCampaign(db, input.id);
+  // 同一份內容不能用不同期號建兩次（會寄兩封）：網頁版網址（正規化後）、同名單同內文、原稿位置任一相同，且對方沒被取消，就擋。
+  // 原稿位置只跟「還沒寄完」的期比（同一個原稿路徑每期都會重用，寄完的舊期不該擋新的一期）；網址與內文跟寄完的也比。
+  const twin = await findTwin(db, input, hash);
+  if (twin) return { ok: false, reason: 'duplicate_content', twin: twin.id, twinStatus: twin.status, twinBy: twin.by };
   if (!existing) {
     const r = await db
       .prepare(
@@ -186,7 +220,11 @@ export async function recordPreflight(db: Db, id: string, result: PreflightRecor
   const errors = Array.isArray(result.issues) ? result.issues.filter((i) => i && i.severity === 'error').slice(0, 50).map((i) => String(i.code ?? i.message ?? 'error').slice(0, 100)) : [];
   // 回報 ok 但列了 error＝自相矛盾，當沒過。
   const ok = result.ok && errors.length === 0;
-  const record = JSON.stringify({ ok, hash: c.content_hash, at: nowIso(now), errors });
+  // 給預覽頁看的明細（只留嚴重度、代碼、說明，截長；不放收件人資料）。
+  const issues = Array.isArray(result.issues)
+    ? result.issues.filter((i) => i && typeof i === 'object').slice(0, 50).map((i) => ({ severity: String(i.severity ?? '').slice(0, 10), code: String(i.code ?? '').slice(0, 60), message: String(i.message ?? '').slice(0, 300) }))
+    : [];
+  const record = JSON.stringify({ ok, hash: c.content_hash, at: nowIso(now), errors, issues });
   const r = await db.prepare('UPDATE campaigns SET preflight = ?, updated_at = ? WHERE id = ? AND content_hash = ?').bind(record, nowIso(now), id, c.content_hash).run();
   if ((r.meta.changes ?? 0) !== 1) return { ok: false, reason: 'changed_meanwhile' };
   // 檢查沒過：已排程的退回 approved（不准留在 scheduled）。

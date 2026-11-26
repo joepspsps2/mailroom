@@ -125,6 +125,8 @@ test('管理入口：存草稿、記檢查、核准、排程、查進度、節�
   assert.equal((await call('PUT', '/v1/campaigns/api-1', draft))?.status, 200);
   assert.equal((await call('POST', '/v1/campaigns/api-1/schedule', { at: w.now().toISOString() }))?.status, 409);
   assert.equal((await call('POST', '/v1/campaigns/api-1/preflight', { ok: true, issues: [] }))?.status, 200);
+  assert.equal((await call('POST', '/v1/campaigns/api-1/approve', { note: 'owner ok' }))?.status, 409, '沒有預覽不能核准');
+  assert.equal((await call('POST', '/v1/campaigns/api-1/preview', {}))?.status, 200);
   assert.equal((await call('POST', '/v1/campaigns/api-1/approve', { note: 'owner ok' }))?.status, 200);
   const sch = await call('POST', '/v1/campaigns/api-1/schedule', { at: w.now().toISOString() });
   assert.equal(sch?.status, 200);
