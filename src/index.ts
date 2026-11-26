@@ -18,6 +18,7 @@ import { handleCfEvent } from './cf-events.ts';
 import { listMembers, listStatus, listSubscribe, listUnsubscribe, type SubscribeInput, type UnsubscribeInput } from './lists.ts';
 import { bearer, json, notFound, sameToken } from './http.ts';
 import { ADMIN_LIMITS, routeLists } from './list-routes.ts';
+import { routeExport } from './export.ts';
 import { handleUnsubRequest, unsubscribeLinksForEmail, unsubSecrets, type UnsubLinks } from './unsub.ts';
 import { handleEmailMessage, unsubConfig } from './unsub-wiring.ts';
 import { warnIfNoAlert } from './alert.ts';
@@ -284,6 +285,10 @@ export default {
     // 名單管理入口（帶管理口令）：見 list-routes.ts。
     const listResponse = await routeLists(request, env.DB, env.DRILL_TOKEN);
     if (listResponse) return listResponse;
+
+    // 分析匯出（帶管理口令）：見 export.ts。
+    const exportResponse = await routeExport(request, env.DB, env.DRILL_TOKEN);
+    if (exportResponse) return exportResponse;
 
     // 退訂頁與一鍵退訂：GET /u/{券}（確認頁）、POST /u/{券}、POST /u/{券}/resubscribe。
     const unsubResponse = await handleUnsubRequest(env.DB, unsubConfig(env), request);
