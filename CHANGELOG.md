@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3
+
+Nothing changes unless you set the new options; the default output is byte for byte as in 0.3.2.
+
+### New
+
+- **Body text size and spacing** (`theme.bodyFontSize`, `theme.bodyLineHeight`, `theme.paragraphGap`, see `docs/composing.md`): set the font size (12–24 px) and line height (1.2–2.4) of paragraphs and list items, and the space below each block (0–40 px). Headings, tables, code blocks and quotes keep their sizes. Out-of-range values throw when the template is created.
+
 ## 0.3.2
 
 Nothing changes unless you set the new options; the default layout renders byte for byte as in 0.3.1.

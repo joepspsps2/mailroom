@@ -798,3 +798,36 @@ test('imageWidth 只套在自成一行的圖片；文中的小圖不套', () => 
   assert.match(c.html, /alt="大圖" width="568"/);
   assert.match(c.html, /alt="小圖" style="display:inline-block;border:0;max-width:100%;height:auto"/);
 });
+
+test('正文字級／行高／段距：沒給時輸出與舊寫法一字不差', () => {
+  const src = '---\ntitle: T\ndescription: D\n---\n\n第一段\n\n第二段\n\n- 甲\n- 乙\n';
+  const html = compose(base({ template: createTemplate(fullCfg), source: src })).html;
+  assert.ok(html.includes('<p class="mr-text" style="margin:0 0 18px;font-size:16px;line-height:1.8;'));
+  assert.ok(html.includes('<li class="mr-text" style="margin:0 0 8px;font-size:16px;line-height:1.8;'));
+  const same = compose(base({ template: createTemplate({ ...fullCfg, theme: { bodyFontSize: 16, bodyLineHeight: 1.8, paragraphGap: 18 } }), source: src })).html;
+  assert.equal(same, html);
+});
+
+test('bodyFontSize／bodyLineHeight／paragraphGap 會出現在段落與清單項目上；標題與清單項目間距不動', () => {
+  const src = '---\ntitle: T\ndescription: D\n---\n\n## 小標\n\n第一段\n\n第二段\n\n- 甲\n- 乙\n';
+  const html = compose(base({ template: createTemplate({ ...fullCfg, theme: { bodyFontSize: 18, bodyLineHeight: 2, paragraphGap: 30 } }), source: src })).html;
+  assert.ok(html.includes('<p class="mr-text" style="margin:0 0 30px;font-size:18px;line-height:2;'));
+  assert.ok(html.includes('<li class="mr-text" style="margin:0 0 8px;font-size:18px;line-height:2;'));
+  assert.ok(html.includes('font-size:22px;line-height:1.4;font-weight:700'));
+});
+
+test('paragraphGap: 0 合法；超出範圍或非整數會拋錯', () => {
+  const src = '---\ntitle: T\ndescription: D\n---\n\n第一段\n\n第二段\n';
+  const html = compose(base({ template: createTemplate({ ...fullCfg, theme: { paragraphGap: 0 } }), source: src })).html;
+  assert.ok(html.includes('style="margin:0 0 0px;'));
+  const bad = (theme: object) => () => createTemplate({ ...fullCfg, theme });
+  assert.throws(bad({ bodyFontSize: 11 }), /bodyFontSize.*between 12 and 24/);
+  assert.throws(bad({ bodyFontSize: 25 }), /between 12 and 24/);
+  assert.throws(bad({ bodyFontSize: 16.5 }), /whole number/);
+  assert.throws(bad({ bodyLineHeight: 1.1 }), /bodyLineHeight.*between 1.2 and 2.4/);
+  assert.throws(bad({ bodyLineHeight: 2.5 }), /between 1.2 and 2.4/);
+  assert.throws(bad({ paragraphGap: -1 }), /paragraphGap.*between 0 and 40/);
+  assert.throws(bad({ paragraphGap: 41 }), /between 0 and 40/);
+  assert.throws(bad({ paragraphGap: 10.5 }), /whole number/);
+  createTemplate({ ...fullCfg, theme: { bodyFontSize: 12, bodyLineHeight: 2.4, paragraphGap: 40 } });
+});

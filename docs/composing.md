@@ -175,3 +175,11 @@ Article images: Outlook for Windows ignores `max-width` and shows an image at it
 `card` at the default 600) and every article image gets that `width` attribute, still with `max-width:100%` for phones.
 Only images that stand on their own line get it (images inside a line of text keep their own size). Those images are scaled to exactly that width, so set it only when your article images are at least that wide (serve them at
 about twice the width for sharp screens). Without it nothing changes.
+
+Body text size and spacing (all optional; without them the output is byte for byte what it was before):
+
+- `theme.bodyFontSize` — font size in px of paragraphs and list items. A whole number from 12 to 24. Default 16.
+- `theme.bodyLineHeight` — line height of paragraphs and list items, as a multiple of the font size. A number from 1.2 to 2.4. Default 1.8.
+- `theme.paragraphGap` — space in px below each block (paragraph, list, quote, table, image…). A whole number from 0 to 40; `0` is allowed. Default 18. The gap between list items stays 8 px.
+
+Headings, tables, code blocks and quotes keep their own font sizes. Values outside the ranges throw when the template is created.
