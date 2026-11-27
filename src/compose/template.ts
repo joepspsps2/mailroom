@@ -19,6 +19,12 @@ export interface Theme {
    * 圖會被放大或縮小到這個寬度，所以只在正文圖片都至少這麼寬時設定；不可超過內容寬度扣掉左右留白。沒給＝不寫屬性（舊行為）。
    */
   imageWidth?: number;
+  /** 正文段落與清單項目的字級（px）。12～24 的整數。沒給＝16（舊行為）。標題、表格、程式碼區塊、引言不受影響。 */
+  bodyFontSize?: number;
+  /** 正文段落與清單項目的行高（倍數）。1.2～2.4 的數字。沒給＝1.8（舊行為）。 */
+  bodyLineHeight?: number;
+  /** 區塊之間的下邊距（px）。0～40 的整數。沒給＝18（舊行為）。清單項目之間的間距不受影響。 */
+  paragraphGap?: number;
   dark: { bg: string; card: string; text: string; muted: string; link: string; border: string; codeBg: string };
 }
 
@@ -133,6 +139,10 @@ export function createTemplate(cfg: TemplateConfig): EmailTemplate {
     const inner = theme.width - (layout === 'full' ? 32 : 64);
     if (!Number.isInteger(theme.imageWidth) || theme.imageWidth <= 0 || theme.imageWidth > inner) throw new Error(`theme.imageWidth must be a positive whole number of pixels, at most ${inner} for this layout`);
   }
+  const { bodyFontSize: fs, bodyLineHeight: lh, paragraphGap: gap } = theme;
+  if (fs !== undefined && (!Number.isInteger(fs) || fs < 12 || fs > 24)) throw new Error('theme.bodyFontSize must be a whole number of pixels between 12 and 24');
+  if (lh !== undefined && (typeof lh !== 'number' || !Number.isFinite(lh) || lh < 1.2 || lh > 2.4)) throw new Error('theme.bodyLineHeight must be a number between 1.2 and 2.4');
+  if (gap !== undefined && (!Number.isInteger(gap) || gap < 0 || gap > 40)) throw new Error('theme.paragraphGap must be a whole number of pixels between 0 and 40');
   const labels: Labels = { ...DEFAULT_LABELS, ...cfg.labels };
   const lang = cfg.lang ?? 'en';
   const w = theme.width;

@@ -50,11 +50,17 @@ function listItemHtml(blocks: Block[], c: Ctx): string {
   return blocks.map((b, i) => blockHtml(b, c, i === blocks.length - 1)).join('');
 }
 
+// 正文（段落與清單項目）的字級與行高；沒設定就是 16px／1.8（舊行為）。
+function bodyTypeCss(c: Ctx): string {
+  return `font-size:${c.theme.bodyFontSize ?? 16}px;line-height:${c.theme.bodyLineHeight ?? 1.8}`;
+}
+
 function blockHtml(b: Block, c: Ctx, last = false): string {
-  const mb = last ? '0' : '18px';
+  const mb = last ? '0' : `${c.theme.paragraphGap ?? 18}px`;
+  const bodyType = bodyTypeCss(c);
   switch (b.t) {
     case 'p':
-      return `<p class="mr-text" style="margin:0 0 ${mb};font-size:16px;line-height:1.8;${T(c)}">${inlines(b.c, c)}</p>`;
+      return `<p class="mr-text" style="margin:0 0 ${mb};${bodyType};${T(c)}">${inlines(b.c, c)}</p>`;
     case 'h': {
       const size = [0, 26, 22, 19, 17, 16, 16][b.level];
       const lv = Math.min(b.level, 6);
@@ -66,7 +72,7 @@ function blockHtml(b: Block, c: Ctx, last = false): string {
       return `<blockquote class="mr-bd mr-muted" style="margin:0 0 ${mb};padding:2px 0 2px 14px;border-left:3px solid ${c.theme.border};color:${c.theme.muted}">${b.c.map((x, i) => blockHtml(x, c, i === b.c.length - 1)).join('')}</blockquote>`;
     case 'list': {
       const tag = b.ordered ? 'ol' : 'ul';
-      const items = b.items.map((it) => `<li class="mr-text" style="margin:0 0 8px;font-size:16px;line-height:1.8;${T(c)}">${listItemHtml(it, c)}</li>`).join('');
+      const items = b.items.map((it) => `<li class="mr-text" style="margin:0 0 8px;${bodyType};${T(c)}">${listItemHtml(it, c)}</li>`).join('');
       const start = b.ordered && b.start !== undefined ? ` start="${b.start}"` : '';
       return `<${tag}${start} style="margin:0 0 ${mb};padding-left:24px">${items}</${tag}>`;
     }
