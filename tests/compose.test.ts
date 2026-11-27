@@ -791,3 +791,10 @@ test('正文圖片寬度 imageWidth：給了才寫 width 屬性（Outlook 用）
   assert.throws(() => createTemplate({ ...fullCfg, layout: 'card', theme: { imageWidth: 537 } }), /at most 536/);
   assert.throws(() => createTemplate({ ...fullCfg, theme: { imageWidth: 0 } }), /positive whole/);
 });
+
+test('imageWidth 只套在自成一行的圖片；文中的小圖不套', () => {
+  const t = createTemplate({ ...fullCfg, theme: { imageWidth: 568 } });
+  const c = compose(base({ template: t, source: '---\ntitle: T\ndescription: D\n---\n\n![大圖](https://img.example.com/a.png)\n\n文字 ![小圖](https://img.example.com/b.png) 文字\n' }));
+  assert.match(c.html, /alt="大圖" width="568"/);
+  assert.match(c.html, /alt="小圖" style="display:inline-block;border:0;max-width:100%;height:auto"/);
+});

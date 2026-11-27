@@ -173,5 +173,5 @@ in dark mode, bake its own background and clear space into the image: mail apps 
 Article images: Outlook for Windows ignores `max-width` and shows an image at its file width unless the `<img>` has a
 `width` attribute. Set `theme.imageWidth` (px, at most the content width minus the side padding: 568 for `full`, 536 for
 `card` at the default 600) and every article image gets that `width` attribute, still with `max-width:100%` for phones.
-Images are scaled to exactly that width, so set it only when your article images are at least that wide (serve them at
+Only images that stand on their own line get it (images inside a line of text keep their own size). Those images are scaled to exactly that width, so set it only when your article images are at least that wide (serve them at
 about twice the width for sharp screens). Without it nothing changes.
