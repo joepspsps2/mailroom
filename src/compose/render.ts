@@ -17,6 +17,9 @@ function linkHtml(l: Inline & { t: 'link' }, c: Ctx): string {
 }
 
 function imgHtml(src: string, alt: string, c: Ctx): string {
+  // imageWidth：給 Outlook for Windows 一個 width 屬性（它不吃 max-width，否則照原圖寬度顯示）；其他信箱仍以 max-width:100% 縮到螢幕寬。
+  const w = c.theme.imageWidth;
+  if (w) return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" width="${w}" style="display:block;border:0;width:${w}px;max-width:100%;height:auto">`;
   return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="display:block;border:0;max-width:100%;height:auto">`;
 }
 

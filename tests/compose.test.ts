@@ -729,3 +729,65 @@ test('a link inside link text is blocked (the site shows the outer brackets and 
   const r = compose({ source: '前 [[內](https://example.com/x) 外](https://example.com/y) 後\n', template: createTemplate({ brandName: 'X', postalAddress: '1 Example Street' }), issue: 't-1' });
   assert.ok(r.problems.some((p) => p.severity === 'error' && p.code === 'unsupported_syntax' && /連結文字裡又有一個連結/.test(p.message)));
 });
+
+const fullCfg = {
+  brandName: 'Example Weekly',
+  lang: 'zh-Hant',
+  footerLines: ['你收到這封信，是因為你訂閱了 Example Weekly。'],
+  postalAddress: '1 Example Street, Sample City 00000',
+  logoUrl: 'https://example.com/logo-2x.png',
+  logoWidth: 232,
+  logoHeight: 125,
+  layout: 'full' as const,
+};
+
+test('版面 full：沒有灰底與卡片邊框；寬度預設 100%、最多 600；左右 16 px 寫在行內（不靠媒體查詢）', () => {
+  const full = createTemplate(fullCfg);
+  const html = compose(base({ template: full })).html;
+  assert.ok(!html.includes('#f3f3f3'), '沒有灰底');
+  assert.ok(!html.includes('mr-card mr-bd'), '沒有卡片外框');
+  assert.match(html, /class="mr-wrap" width="100%"[^>]*style="width:100%;max-width:600px"/);
+  assert.match(html, /<td class="mr-pad mr-text" style="[^"]*padding-left:16px;padding-right:16px/);
+  assert.match(html, /<!--\[if mso\]><table role="presentation" width="600"/, 'Outlook 桌機仍固定 600');
+  assert.match(html, /<body class="mr-card" style="margin:0;padding:0;background:#ffffff/);
+});
+
+test('版面 full：退訂連結、地址、網頁版連結、開信圖、預覽文字都還在，寄前檢查照樣通過', async () => {
+  const full = createTemplate(fullCfg);
+  const c = compose(base({ template: full }));
+  for (const s of ['{{unsubscribe_url}}', '{{web_url}}', '1 Example Street', 'https://t.example.com/o/{{o}}.gif']) assert.ok(c.html.includes(s), s);
+  assert.equal(c.headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+  const r = await preflight(c, { template: full, fetch: okFetch, webUrl: WEB });
+  assert.deepEqual(codes(r), []);
+  assert.equal(c.text, compose(base({ template: createTemplate({ ...fullCfg, layout: 'card' }) })).text, '純文字版跟版面無關');
+});
+
+test('頁首圖示：給寬高就寫 width／height 屬性＋max-width:100%；沒給維持 36 px 高；寬高不完整或太寬就拋錯', () => {
+  const html = createTemplate(fullCfg).renderHtml({ subject: 's', preheader: 'p', bodyHtml: '', bodyText: '' });
+  assert.match(html, /<img src="https:\/\/example\.com\/logo-2x\.png" alt="Example Weekly" width="232" height="125" style="display:block;border:0;width:232px;max-width:100%;height:auto">/);
+  const old = createTemplate({ ...fullCfg, logoWidth: undefined, logoHeight: undefined, layout: undefined }).renderHtml({ subject: 's', preheader: 'p', bodyHtml: '', bodyText: '' });
+  assert.match(old, /height="36" style="display:block;border:0;height:36px;width:auto"/);
+  assert.throws(() => createTemplate({ ...fullCfg, logoHeight: undefined }), /together/);
+  assert.throws(() => createTemplate({ ...fullCfg, logoWidth: 0 }), /positive whole/);
+  assert.throws(() => createTemplate({ ...fullCfg, logoWidth: 601 }), /wider than the content width/);
+  assert.throws(() => createTemplate({ ...fullCfg, layout: 'wide' as never }), /layout must be/);
+});
+
+test('版面預設仍是 card：沒給 layout 與 layout: card 產出一字不差', () => {
+  const cfg = { ...fullCfg, layout: undefined };
+  const a = compose(base({ template: createTemplate(cfg) })).html;
+  const b = compose(base({ template: createTemplate({ ...cfg, layout: 'card' }) })).html;
+  assert.ok(a.includes('#f3f3f3') && a.includes('mr-card mr-bd'));
+  assert.equal(a, b);
+});
+
+test('正文圖片寬度 imageWidth：給了才寫 width 屬性（Outlook 用），仍保留 max-width:100%；沒給維持舊寫法；超過內容寬度就拋錯', () => {
+  const withW = compose(base({ template: createTemplate({ ...fullCfg, theme: { imageWidth: 568 } }) })).html;
+  assert.match(withW, /<img src="https:\/\/img\.example\.com\/[^"]*" alt="[^"]*" width="568" style="display:block;border:0;width:568px;max-width:100%;height:auto">/);
+  const without = compose(base({ template: createTemplate(fullCfg) })).html;
+  assert.ok(!/<img [^>]*width="568"/.test(without));
+  assert.match(without, /style="display:block;border:0;max-width:100%;height:auto"/);
+  assert.throws(() => createTemplate({ ...fullCfg, theme: { imageWidth: 569 } }), /at most 568/);
+  assert.throws(() => createTemplate({ ...fullCfg, layout: 'card', theme: { imageWidth: 537 } }), /at most 536/);
+  assert.throws(() => createTemplate({ ...fullCfg, theme: { imageWidth: 0 } }), /positive whole/);
+});

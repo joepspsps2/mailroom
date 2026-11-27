@@ -154,3 +154,24 @@ A template is configuration, not code: `createTemplate()` takes a brand name, op
 trusted `footerHtml` / `footerText` block, labels, a theme and the postal address. The layout is table-based with inline CSS
 (Outlook-safe), 600 px wide, with a dark-mode override. Keep brand templates in your own configuration; the engine ships
 none. The compose module is tested against a made-up issue in `tests/fixtures/`.
+
+Two layouts (`layout`):
+
+- `'card'` (default, unchanged): the content sits on a bordered card over a background band. On phones the side padding
+  shrinks to 16 px only where the mail app honours media queries.
+- `'full'`: one background colour (the theme's `card` colour) for the whole mail, no card and no border. The content table
+  is `width:100%; max-width:<theme.width>px` and the side padding is 16 px inline, so the text fills a phone screen even
+  where media queries are stripped (for example the Gmail app with a non-Gmail account); on a desktop it stays centred at
+  the theme width. Outlook for Windows keeps a fixed-width table through a conditional comment. The "view in browser" link
+  gets its own line above the logo, the footer is separated by a thin top rule, and the unsubscribe line is 14 px.
+
+Logo size: give `logoWidth` and `logoHeight` together (display size in px, not wider than the theme width) and serve the
+image at twice that size for sharp screens; the `<img>` then gets `width`/`height` attributes and `max-width:100%`. Without
+them the logo is 36 px tall, as before. Mail apps do not show SVG reliably: use PNG (or JPEG). If the logo must stay legible
+in dark mode, bake its own background and clear space into the image: mail apps do not invert images.
+
+Article images: Outlook for Windows ignores `max-width` and shows an image at its file width unless the `<img>` has a
+`width` attribute. Set `theme.imageWidth` (px, at most the content width minus the side padding: 568 for `full`, 536 for
+`card` at the default 600) and every article image gets that `width` attribute, still with `max-width:100%` for phones.
+Images are scaled to exactly that width, so set it only when your article images are at least that wide (serve them at
+about twice the width for sharp screens). Without it nothing changes.

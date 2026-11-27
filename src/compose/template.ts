@@ -14,6 +14,11 @@ export interface Theme {
   codeBg: string;
   /** 內容寬度（px）。 */
   width: number;
+  /**
+   * 正文圖片的顯示寬度（px）。給了就寫成 <img width> 屬性（Outlook for Windows 只認屬性），其他信箱仍縮到螢幕寬。
+   * 圖會被放大或縮小到這個寬度，所以只在正文圖片都至少這麼寬時設定；不可超過內容寬度扣掉左右留白。沒給＝不寫屬性（舊行為）。
+   */
+  imageWidth?: number;
   dark: { bg: string; card: string; text: string; muted: string; link: string; border: string; codeBg: string };
 }
 
@@ -60,6 +65,14 @@ export interface TemplateConfig {
   tagline?: string;
   /** 頁首圖示（絕對 https 網址）；沒有就只放名稱。 */
   logoUrl?: string;
+  /** 頁首圖示的顯示寬高（px，兩個一起給）。圖檔用 2 倍大小給高解析螢幕，這裡寫顯示大小；沒給就固定 36 px 高。 */
+  logoWidth?: number;
+  logoHeight?: number;
+  /**
+   * 版面。'card'（預設）：灰底上一張有邊框的白卡。'full'：整封同一個底色、沒有卡片與邊框，
+   * 內容寬度最多 theme.width、左右只留 16 px（不靠媒體查詢，手機上文字接近滿版；桌機置中）。
+   */
+  layout?: 'card' | 'full';
   /** <html lang>。 */
   lang?: string;
   theme?: Partial<Theme> & { dark?: Partial<Theme['dark']> };
@@ -103,8 +116,23 @@ function mergeTheme(t: TemplateConfig['theme']): Theme {
   return { ...DEFAULT_THEME, ...t, dark: { ...DEFAULT_THEME.dark, ...(t?.dark ?? {}) } };
 }
 
+function checkLogoSize(cfg: TemplateConfig, width: number): void {
+  const { logoWidth: lw, logoHeight: lh } = cfg;
+  if (lw === undefined && lh === undefined) return;
+  const ok = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n > 0;
+  if (!ok(lw) || !ok(lh)) throw new Error('logoWidth and logoHeight must be given together, as positive whole numbers of pixels');
+  if (lw > width) throw new Error(`logoWidth (${lw}) must not be wider than the content width (${width})`);
+}
+
 export function createTemplate(cfg: TemplateConfig): EmailTemplate {
+  const layout = cfg.layout ?? 'card';
+  if (layout !== 'card' && layout !== 'full') throw new Error(`layout must be "card" or "full" (got "${String(layout)}")`);
   const theme = mergeTheme(cfg.theme);
+  checkLogoSize(cfg, theme.width);
+  if (theme.imageWidth !== undefined) {
+    const inner = theme.width - (layout === 'full' ? 32 : 64);
+    if (!Number.isInteger(theme.imageWidth) || theme.imageWidth <= 0 || theme.imageWidth > inner) throw new Error(`theme.imageWidth must be a positive whole number of pixels, at most ${inner} for this layout`);
+  }
   const labels: Labels = { ...DEFAULT_LABELS, ...cfg.labels };
   const lang = cfg.lang ?? 'en';
   const w = theme.width;
@@ -130,7 +158,9 @@ export function createTemplate(cfg: TemplateConfig): EmailTemplate {
   const renderHtml = (p: TemplateParts): string => {
     const pre = escapeHtml(p.preheader);
     const header = cfg.logoUrl
-      ? `<img src="${escapeHtml(cfg.logoUrl)}" alt="${escapeHtml(cfg.brandName)}" height="36" style="display:block;border:0;height:36px;width:auto">`
+      ? cfg.logoWidth
+        ? `<img src="${escapeHtml(cfg.logoUrl)}" alt="${escapeHtml(cfg.brandName)}" width="${cfg.logoWidth}" height="${cfg.logoHeight}" style="display:block;border:0;width:${cfg.logoWidth}px;max-width:100%;height:auto">`
+        : `<img src="${escapeHtml(cfg.logoUrl)}" alt="${escapeHtml(cfg.brandName)}" height="36" style="display:block;border:0;height:36px;width:auto">`
       : `<span class="mr-text" style="font-size:20px;font-weight:700;color:${theme.accent}">${escapeHtml(cfg.brandName)}</span>`;
     const tagline = cfg.tagline ? `<div class="mr-muted" style="font-size:13px;color:${theme.muted};margin-top:2px">${escapeHtml(cfg.tagline)}</div>` : '';
     const greeting = cfg.greeting ? `{{#name}}<p class="mr-text" style="margin:0 0 18px;font-size:16px;line-height:1.8;color:${theme.text}">${escapeHtml(cfg.greeting)}</p>{{/name}}` : '';
@@ -143,7 +173,7 @@ export function createTemplate(cfg: TemplateConfig): EmailTemplate {
       .join('');
     const sentTo = labels.sentTo.replace('{email}', '{{email}}');
     const lead = cfg.unsubscribeLead ? `${escapeHtml(cfg.unsubscribeLead)} ` : '';
-    return `<!doctype html>
+    const head = `<!doctype html>
 <html lang="${escapeHtml(lang)}" xmlns="http://www.w3.org/1999/xhtml">
 <head>
 <meta charset="utf-8">
@@ -153,7 +183,36 @@ export function createTemplate(cfg: TemplateConfig): EmailTemplate {
 <title>${escapeHtml(p.subject)}</title>
 <style>${css}</style>
 </head>
-<body class="mr-bg" style="margin:0;padding:0;background:${theme.bg};word-break:break-word">
+`;
+    const pixel = p.pixelUrl ? `<img src="${escapeHtml(p.pixelUrl)}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px">` : '';
+    const sentToLine = `{{#email}}<p class="mr-muted" style="margin:0 0 6px;font-size:12px;line-height:1.7;color:${theme.muted}">${escapeHtml(sentTo)}</p>{{/email}}`;
+    if (layout === 'full') {
+      // 整封同一底色（卡片色）；寬度預設就是 100%、最多 theme.width；左右 16 px 直接寫在行內，不靠媒體查詢。
+      const pad = 'padding-left:16px;padding-right:16px';
+      const f = `font-family:${theme.font}`;
+      return `${head}<body class="mr-card" style="margin:0;padding:0;background:${theme.card};word-break:break-word">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;font-size:1px;line-height:1px;color:${theme.card}">${pre}${'&#8204;&nbsp;'.repeat(40)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="mr-card" style="background:${theme.card}"><tr><td align="center" style="padding:0">
+<!--[if mso]><table role="presentation" width="${w}" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+<table role="presentation" class="mr-wrap" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:${w}px">
+<tr><td class="mr-pad" align="right" style="padding-top:12px;${pad};${f};font-size:12px;line-height:1.5"><a class="mr-link" href="{{web_url}}" style="color:${theme.link}">${escapeHtml(labels.viewInBrowser)}</a></td></tr>
+<tr><td class="mr-pad" style="padding-top:8px;padding-bottom:8px;${pad};${f}">${header}${tagline}</td></tr>
+<tr><td class="mr-pad mr-text" style="padding-top:12px;padding-bottom:24px;${pad};${f};color:${theme.text};overflow-wrap:break-word;word-wrap:break-word">
+${greeting}${p.bodyHtml}
+</td></tr>
+<tr><td class="mr-pad mr-bd" style="padding-top:20px;padding-bottom:28px;${pad};border-top:1px solid ${theme.border};${f};overflow-wrap:break-word;word-wrap:break-word">
+${cfg.footerHtml ?? ''}${footLines}<p class="mr-muted" style="margin:0 0 6px;font-size:12px;line-height:1.7;color:${theme.muted}">${escapeHtml(cfg.postalAddress)}</p>
+${sentToLine}
+<p class="mr-muted" style="margin:0;font-size:14px;line-height:1.9;color:${theme.muted}">${lead}<a class="mr-link" href="{{unsubscribe_url}}" style="color:${theme.link}">${escapeHtml(labels.unsubscribe)}</a></p>
+${pixel}
+</td></tr>
+</table>
+<!--[if mso]></td></tr></table><![endif]-->
+</td></tr></table>
+</body>
+</html>`;
+    }
+    return `${head}<body class="mr-bg" style="margin:0;padding:0;background:${theme.bg};word-break:break-word">
 <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;font-size:1px;line-height:1px;color:${theme.bg}">${pre}${'&#8204;&nbsp;'.repeat(40)}</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="mr-bg" style="background:${theme.bg}"><tr><td align="center" style="padding:20px 10px">
 <!--[if mso]><table role="presentation" width="${w}" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
@@ -167,9 +226,9 @@ ${greeting}${p.bodyHtml}
 </td></tr>
 <tr><td class="mr-pad" style="padding:16px 4px;font-family:${theme.font}">
 ${cfg.footerHtml ?? ''}${footLines}<p class="mr-muted" style="margin:0 0 6px;font-size:12px;line-height:1.7;color:${theme.muted}">${escapeHtml(cfg.postalAddress)}</p>
-{{#email}}<p class="mr-muted" style="margin:0 0 6px;font-size:12px;line-height:1.7;color:${theme.muted}">${escapeHtml(sentTo)}</p>{{/email}}
+${sentToLine}
 <p class="mr-muted" style="margin:0;font-size:12px;line-height:1.7;color:${theme.muted}">${lead}<a class="mr-link" href="{{unsubscribe_url}}" style="color:${theme.link}">${escapeHtml(labels.unsubscribe)}</a></p>
-${p.pixelUrl ? `<img src="${escapeHtml(p.pixelUrl)}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px">` : ''}
+${pixel}
 </td></tr>
 </table>
 <!--[if mso]></td></tr></table><![endif]-->
