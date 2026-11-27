@@ -16,7 +16,10 @@ function linkHtml(l: Inline & { t: 'link' }, c: Ctx): string {
   return `<a class="mr-link" href="${escapeHtml(href)}" style="color:${c.theme.link};text-decoration:underline;word-break:break-word;overflow-wrap:anywhere">${inner}</a>`;
 }
 
-function imgHtml(src: string, alt: string, c: Ctx): string {
+function imgHtml(src: string, alt: string, c: Ctx, inline = false): string {
+  // imageWidth：給 Outlook for Windows 一個 width 屬性（它不吃 max-width，否則照原圖寬度顯示）；其他信箱仍以 max-width:100% 縮到螢幕寬。
+  const w = inline ? undefined : c.theme.imageWidth; // 文中的小圖不套固定寬度
+  if (w) return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" width="${w}" style="display:block;border:0;width:${w}px;max-width:100%;height:auto">`;
   return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="display:block;border:0;max-width:100%;height:auto">`;
 }
 
@@ -35,7 +38,7 @@ function inlineHtml(n: Inline, c: Ctx): string {
     case 'link':
       return linkHtml(n, c);
     case 'image':
-      return imgHtml(n.src, n.alt, c).replace('display:block;', 'display:inline-block;');
+      return imgHtml(n.src, n.alt, c, true).replace('display:block;', 'display:inline-block;');
   }
 }
 

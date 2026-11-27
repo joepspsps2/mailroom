@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+Nothing changes unless you set the new options; the default layout renders byte for byte as in 0.3.1.
+
+### New
+
+- **Full-width layout** (`layout: 'full'` in `createTemplate`, see `docs/composing.md`): one background colour, no card or border, content `width:100%` up to the theme width with 16 px side padding written inline, so phones show the text at nearly full width without relying on media queries. Unsubscribe link, postal address, web-version link, open pixel, headers and the pre-send check are unchanged.
+- **Article image width for Outlook** (`theme.imageWidth`): article images get a `width` attribute so Outlook for Windows does not show them at file width; phones still scale them with `max-width:100%`.
+- **Logo display size** (`logoWidth` / `logoHeight`): the header logo can be shown at a set size (serve a 2x image); invalid sizes throw when the template is created.
+
 ## 0.3.1
 
 ### Upgrading from 0.3.0
